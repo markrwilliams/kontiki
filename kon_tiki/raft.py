@@ -1,4 +1,7 @@
 '''An implementation of the Raft consensus algorithm'''
+import operator
+from twisted.internet import reactor, defer
+from twisted.spread import pb
 from collections import namedtuple
 
 
@@ -34,10 +37,19 @@ class ListPersist(object):
     def lastIndex(self):
         return len(self.log) - 1
 
-    def indexMatchesTerm(self, index, term):
+    def _compareIndexToTerm(self, index, term, op):
         if index == -1 and not self.log:
             return True
-        return -1 < index < len(self.log) and self.log[index].term == term
+        return -1 < index < len(self.log) and op(self.log[index].term, term)
+
+    def logSlice(self, start, end):
+        return self.log[start:end]
+
+    def indexMatchesTerm(self, index, term):
+        return self._compareIndexToTerm(index, term, operator.eq)
+
+    def lastIndexNewerThanTerm(self, term):
+        return self._compareIndexToTerm(self.lastIndex, term, operator.le)
 
     def matchLogToEntries(self, matchAfter, entries):
         '''Delete existing log entries that conflict with `entries` and return
@@ -69,6 +81,9 @@ class ListPersist(object):
         self.log.extend(entries)
 
 
+RERUN_RPC = object()
+
+
 class Server(object):
     '''A Raft participant.
 
@@ -76,42 +91,91 @@ class Server(object):
 
     `persister`: an object that implements the Persist protocol and
     can save and restore to stable storage
+
+    `applyCommand`: callable invoked with the command to apply
      '''
     nextState = None
 
-    def __init__(self, peers, persister, commitIndex=0, lastApplied=0):
+    def __init__(self, identity, peers, persister, applyCommand,
+                 commitIndex=0, lastApplied=0):
+        self.identity = identity
         self.peers = peers
         self.persister = persister
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
+        self.applyCommand = applyCommand
+        self.applyCommited()
+
+    def applyCommitted(self):
+        if self.lastApplied < self.commitIndex:
+            for entry in self.persister.logSlice(self.lastApplied,
+                                                 self.commitIndex + 1):
+                self.applyCommand(entry.command)
+            self.lastApplied = self.commitIndex
+
+    def willBecomeFollower(self, term):
+        if term > self.persister.currentTerm:
+            self.persister.currentTerm = term
+            self.nextState = (Follower
+                              if not isinstance(self, Follower)
+                              else None)
+            return True
+        return False
 
     def candidateIdOK(self, candidateId):
-        return (self.persister.votedFor is not None
+        return (self.persister.votedFor is None
                 or self.persister.votedFor == candidateId)
 
     def candidateLogUpToDate(self, lastLogIndex, lastLogTerm):
-        if lastLogTerm < self.persister.log[-1].term:
-            return False
-        if lastLogIndex < len(self.persister.log) - 1:
-            return False
-        return True
+        # Section 5.4.1
+        if self.persister.indexMatchesTerm(index=self.persister.lastLogIndex,
+                                           term=lastLogTerm):
+            return self.persister.lastIndex <= lastLogIndex
+        else:
+            return self.persister.lastIndexNewerThanTerm(lastLogTerm)
 
-    def requestVote(self, term, candidateId, lastLogIndex, lastLogTerm):
+    def remote_appendEntries(self,
+                             term, leaderId, prevLogIndex,
+                             prevLogTerm, entries, leaderCommit):
         # RPC
-        if term < self.currentTerm:
+        if self.willBecomeFollower(term):
+            return RERUN_RPC
+        return self.persister.currentTerm, False
+
+    def remote_requestVote(self, term, candidateId, lastLogIndex, lastLogTerm):
+        # RPC
+        if term < self.persister.currentTerm:
             voteGranted = False
         else:
             voteGranted = (self.candidateIdOK(candidateId)
                            and self.candidateLogUpToDate(lastLogIndex,
                                                          lastLogTerm))
             self.persister.votedFor = candidateId
-        return self.currentTerm, voteGranted
+            self.willBecomeFollower(term)
+        return self.persister.currentTerm, voteGranted
+
+
+class Candidate(Server):
+
+    def prepareForElection(self):
+        self.persister.currentTerm += 1
+        self.persister.votedFor = self.identity
+
+    def willBecomeLeader(self, votesSoFar):
+        if votesSoFar > len(self.peers) / 2 + 1:
+            self.next_state = Leader
+            return True
+        return False
 
 
 class Leader(Server):
     '''A Raft leader.'''
 
-    def wonElection(self):
+    def __init__(self, *args, **kwargs):
+        super(Server, self).__init__(*args, **kwargs)
+        self.postElection()
+
+    def postElection(self):
         lastLogIndex = len(self.persister.logs())
         self.nextIndex = dict.fromkeys(self.peer, lastLogIndex)
         self.matchIndex = dict.fromkeys(self.peers, 0)
@@ -122,13 +186,14 @@ class Follower(Server):
 
     leaderId = None
 
-    def appendEntries(self,
-                      term, leaderId, prevLogIndex,
-                      prevLogTerm, entries, leaderCommit):
+    def remote_appendEntries(self,
+                             term, leaderId, prevLogIndex,
+                             prevLogTerm, entries, leaderCommit):
         # RPC
         # 1 & 2
         if (term < self.currentTerm
-           or not self.persister.indexMatchesTerm(prevLogIndex, prevLogTerm)):
+            or not self.persister.indexMatchesTerm(prevLogIndex,
+                                                   prevLogTerm)):
             success = False
         else:
             # 3
@@ -141,7 +206,50 @@ class Follower(Server):
             if leaderCommit > self.commitIndex:
                 self.commitIndex = min(leaderCommit, self.persister.lastIndex)
 
+            self.applyCommitted()
+
             self.leaderId = leaderId
             success = True
 
         return self.currentTerm, success
+
+
+class ServerCycle(pb.Root):
+
+    def __init__(self, identity, peers, persister, applyCommand,
+                 electionTimeoutRange=(.150, .350)):
+        self.identity = identity
+        self.peers = peers
+        self.persister = persister
+        self.applyCommand = applyCommand
+        self.electionTimeoutRange = electionTimeoutRange
+        self.state = Follower(identity, peers, persister, applyCommand)
+
+    def resetElectionTimer(self):
+        self.electionTimeout = random.randrange(*self.electionTimeout)
+        reactor.callLater(random.uniform(*self.electionTimeout),
+                          self.electionTimeout)
+
+    def electionTimeout(self):
+        self.reactor.callLater
+        self.state = Candidate(self.state.identity,
+                               self.state.peers,
+                               self.state.persister,
+                               self.state.applyCommand,
+                               self.state.commitIndex,
+                               self.state.lastApplied)
+        for peer in self.peers:
+            pass
+
+    def remote_appendEntries(self,
+                             term, leaderId, prevLogIndex,
+                             prevLogTerm, entries, leaderCommit):
+        return self.state.remote_appendEntries(term, leaderId,
+                                               prevLogIndex,
+                                               prevLogTerm,
+                                               entries,
+                                               leaderCommit)
+
+    def remote_requestVote(self,
+                           term, candidateId, lastLogIndex, lastLogTerm):
+        pass
