@@ -1,8 +1,18 @@
 '''An implementation of the Raft consensus algorithm'''
-import itertools
 from collections import namedtuple
 
+
 LogEntry = namedtuple('LogEntry', 'term command')
+
+
+class PersistenceError(Exception):
+    '''Raised when an error occurs in a Persist class'''
+
+
+class MatchAfterTooHigh(PersistenceError):
+    '''Raised when Persist.matchLogToEntries is given a prevIndex that's
+    greater than the current size of the log.  Perhaps you didn't call
+    Persist.indexMatchesTerm first?'''
 
 
 class ListPersist(object):
@@ -19,33 +29,44 @@ class ListPersist(object):
         if not log:
             log = []
         self.log = log
-        self.lastIndex = 0
+
+    @property
+    def lastIndex(self):
+        return len(self.log) - 1
 
     def indexMatchesTerm(self, index, term):
         if index == -1 and not self.log:
             return True
-        return index < len(self.log) and self.log[index].term == term
+        return -1 < index < len(self.log) and self.log[index].term == term
 
-    def updateEntries(self, prevIndex, prevTerm, entries):
-        # appendEntries #3
-        if not self.indexMatchesTerm(prevIndex, prevTerm):
-            return False
+    def matchLogToEntries(self, matchAfter, entries):
+        '''Delete existing log entries that conflict with `entries` and return
+        only new entries.
+        '''
+        lastIndex = self.lastIndex
+        if matchAfter > lastIndex:
+            raise MatchAfterTooHigh('matchAfter = %d, '
+                                    'lastIndex = %d' % (matchAfter,
+                                                        self.lastIndex))
+        elif matchAfter == lastIndex or not entries:
+            # no entries can conflict, because entries begins
+            # immediately after our last index or there are no entries
+            return entries
+        else:
+            logIndex = matchAfter + 1
+            for matchesUpTo, entry in enumerate(entries, 1):
+                if logIndex >= len(self.log):
+                    break
+                elif self.log[logIndex].term != entry.term:
+                    del self.log[logIndex:]
+                    matchesUpTo -= 1
+                    break
+                else:
+                    logIndex += 1
+            return entries[matchesUpTo:]
 
-        index = prevIndex + 1
-        newEntries = entries
-        entriesIterator = iter(entries) if index < len(self.log) else ()
-
-        for entry in entriesIterator:
-            if self.log[index].term != entry.term:
-                del self.log[index:]
-                newEntries = itertools.chain([entry], entriesIterator)
-                break
-            index += 1
-
-        # appendEntries #4
-        self.log.extend(newEntries)
-        self.lastIndex = len(self.log) - 1
-        return True
+    def appendNewEntries(self, entries):
+        self.log.extend(entries)
 
 
 class Server(object):
@@ -55,13 +76,14 @@ class Server(object):
 
     `persister`: an object that implements the Persist protocol and
     can save and restore to stable storage
-    '''
+     '''
+    nextState = None
 
-    def __init__(self, peers, persister):
+    def __init__(self, peers, persister, commitIndex=0, lastApplied=0):
         self.peers = peers
         self.persister = persister
-        self.commitIndex = 0
-        self.lastApplied = 0
+        self.commitIndex = commitIndex
+        self.lastApplied = lastApplied
 
     def candidateIdOK(self, candidateId):
         return (self.persister.votedFor is not None
@@ -82,6 +104,7 @@ class Server(object):
             voteGranted = (self.candidateIdOK(candidateId)
                            and self.candidateLogUpToDate(lastLogIndex,
                                                          lastLogTerm))
+            self.persister.votedFor = candidateId
         return self.currentTerm, voteGranted
 
 
@@ -103,18 +126,22 @@ class Follower(Server):
                       term, leaderId, prevLogIndex,
                       prevLogTerm, entries, leaderCommit):
         # RPC
-        # 1.
-        if term < self.currentTerm:
-            return self.currentTerm, False
-        # 2
-        if (prevLogIndex >= len(self.persister.log)
-           or self.persister.log[prevLogIndex].term != term):
-            return self.currentTerm, False
+        # 1 & 2
+        if (term < self.currentTerm
+           or not self.persister.indexMatchesTerm(prevLogIndex, prevLogTerm)):
+            success = False
+        else:
+            # 3
+            new = self.persister.matchLogToEntries(matchAfter=prevLogIndex,
+                                                   entries=entries)
+            # 4
+            self.persister.appendNewEntries(new)
 
-        # 5
-        if leaderCommit > self.commitIndex:
-            lastIndex = len(self.log) - 1
-            self.commitIndex = min(leaderCommit, lastIndex)
+            # 5
+            if leaderCommit > self.commitIndex:
+                self.commitIndex = min(leaderCommit, self.persister.lastIndex)
 
-        self.leaderId = leaderId
-        return self.currentTerm, True
+            self.leaderId = leaderId
+            success = True
+
+        return self.currentTerm, success

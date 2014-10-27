@@ -2,11 +2,17 @@ from kon_tiki import raft
 from twisted.trial import unittest
 
 
-class ListPersistInitTestCase(unittest.TestCase):
+class ListPersistTestCase(unittest.TestCase):
     '''Basic sanity tests for ListPersist.  When more than one persister
     exists, most of these tests should be broken out into a base class
     or mixin...
     '''
+
+    firstEntries = [raft.LogEntry(term=0, command='first1'),
+                    raft.LogEntry(term=0, command='first2'),
+                    raft.LogEntry(term=1, command='first3')]
+    appendedEntries = [raft.LogEntry(term=2, command='append1'),
+                       raft.LogEntry(term=3, command='append2')]
 
     def test_init(self):
         '''A new ListPersist should have its state variables initialized as
@@ -17,87 +23,130 @@ class ListPersistInitTestCase(unittest.TestCase):
         self.assertEqual(persister.votedFor, None)
         self.assertFalse(persister.log)
 
-
-class ListPersistUpdateEntriesTestCase(unittest.TestCase):
-
-    def test_updateEntries_withEmptyLog(self):
-        '''A ListPersist should append entries when its log is entry
-        '''
+    def emptyListPersist(self):
         persister = raft.ListPersist()
-        newEntries = [raft.LogEntry(term=0, command='command1'),
-                      raft.LogEntry(term=1, command='command2')]
-        numberOfEntries = len(newEntries)
-
-        result = persister.updateEntries(prevIndex=-1,
-                                         prevTerm=None,
-                                         entries=newEntries)
-        self.assertTrue(result)
-        self.assertEqual(persister.lastIndex, numberOfEntries - 1)
+        self.assertFalse(persister.log)
+        self.assertEqual(persister.lastIndex, -1)
         return persister
 
-    def test_updateEntries_withConflictPreviousTerm(self):
-        '''A ListPersist should fail when the term of prevIndex does not match prevTerm
+    def test_appendNewEntries(self):
+        '''A ListPersist should append new entries to its log.
         '''
-        persister = self.test_updateEntries_withEmptyLog()
-        ignoredEntries = [raft.LogEntry(term=99, command="Doesn't matter")]
+        persister = self.emptyListPersist()
+        persister.appendNewEntries(self.firstEntries)
 
-        previousLog = persister.log[:]
-        prevIndex = persister.lastIndex
-        conflictingTerm = persister.log[prevIndex].term + 1
+        self.assertEqual(persister.log, self.firstEntries)
+        self.assertEqual(persister.lastIndex, len(self.firstEntries) - 1)
 
-        result = persister.updateEntries(prevIndex=prevIndex,
-                                         prevTerm=conflictingTerm,
-                                         entries=ignoredEntries)
+        persister.appendNewEntries(self.appendedEntries)
 
-        self.assertFalse(result)
-        self.assertEqual(previousLog, persister.log)
+        self.assertEqual(persister.log,
+                         self.firstEntries + self.appendedEntries)
+        self.assertEqual(persister.lastIndex,
+                         len(self.firstEntries)
+                         + len(self.appendedEntries)
+                         - 1)
 
-    def test_updateEntries_appendsToExisting(self):
-        '''A ListPersist should append entries to the end of its log with a
-        matching prevTerm'''
+    def test_indexMatchesTerm(self):
+        '''A ListPersist should determine when a log entry a given index
+        matches a given term'''
+        persister = self.emptyListPersist()
 
-        persister = self.test_updateEntries_withEmptyLog()
-        numberOfEntries = len(persister.log)
+        firstTerm = self.firstEntries[0].term
+        self.assertTrue(persister.indexMatchesTerm(index=-1, term=firstTerm))
 
-        previousLog = persister.log[:]
-        prevIndex = persister.lastIndex
-        prevTerm = persister.log[prevIndex].term
+        persister.appendNewEntries(self.firstEntries)
 
-        appendedEntries = [raft.LogEntry(term=1, command='command3'),
-                           raft.LogEntry(term=2, command='command4')]
-        numberOfEntries += len(appendedEntries)
+        badTerm = firstTerm + 1
+        self.assertFalse(persister.indexMatchesTerm(index=-1, term=badTerm))
+        self.assertFalse(persister.indexMatchesTerm(index=0, term=badTerm))
 
-        result = persister.updateEntries(prevIndex=prevIndex,
-                                         prevTerm=prevTerm,
-                                         entries=appendedEntries)
+        lastTerm = self.firstEntries[-1].term
+        lastIndex = len(self.firstEntries) - 1
+        self.assertTrue(persister.indexMatchesTerm(index=lastIndex,
+                                                   term=lastTerm))
 
-        self.assertTrue(result)
-        self.assertEquals(persister.log, previousLog + appendedEntries)
-        self.assertEquals(persister.lastIndex, numberOfEntries - 1)
+    def _test_matchLogToEntries(self, currentEntries,
+                                matchAfter,
+                                newEntries,
+                                expectedEntries):
+        persister = self.emptyListPersist()
+        persister.appendNewEntries(currentEntries)
+        matchedEntries = persister.matchLogToEntries(matchAfter=matchAfter,
+                                                     entries=newEntries)
+        self.assertEqual(matchedEntries, expectedEntries)
+        return persister
 
-    def test_updateEntries_overwritesConflicting(self):
-        '''A ListPersist should overwrite entries in its log that conflict
-        with new entries
-        '''
-        persister = self.test_updateEntries_withEmptyLog()
-        numberOfEntries = len(persister.log)
+    def test_matchLogToEntries_withEmptyLog(self):
+        '''A ListPersist instance with an empty log should allow all incoming
+        entries unless matchAfter indicates the entries begin after the
+        instance's own log.'''
+        entries = self.firstEntries
+        matchAfter = -1
+        persister = self._test_matchLogToEntries(currentEntries=[],
+                                                 matchAfter=matchAfter,
+                                                 newEntries=entries,
+                                                 expectedEntries=entries)
 
-        untouchedEntries = persister.log[:-1]
-        conflictingTerm = persister.log[-1].term + 1
-        conflictingEntries = [raft.LogEntry(term=conflictingTerm,
-                                            command='conflicting1'),
-                              raft.LogEntry(term=conflictingTerm + 1,
-                                            command='conflicting2')]
+        self.assertRaises(raft.MatchAfterTooHigh,
+                          persister.matchLogToEntries,
+                          matchAfter=matchAfter + 1,
+                          entries=self.firstEntries)
 
-        numberOfEntries = numberOfEntries + len(conflictingEntries) - 1
+    def test_matchLogEntries_allowsContiguousEntries(self):
+        '''A ListPersist should allow all incoming entries when they are
+        contiguous with its log.'''
+        currentEntries = self.firstEntries
+        newEntries = self.appendedEntries
+        matchAfter = len(self.firstEntries) - 1
 
-        prevIndex = persister.lastIndex - 1
-        prevTerm = persister.log[prevIndex].term
+        persister = self._test_matchLogToEntries(currentEntries=currentEntries,
+                                                 matchAfter=matchAfter,
+                                                 newEntries=newEntries,
+                                                 expectedEntries=newEntries)
 
-        result = persister.updateEntries(prevIndex=prevIndex,
-                                         prevTerm=prevTerm,
-                                         entries=conflictingEntries)
+        self.assertRaises(raft.MatchAfterTooHigh,
+                          persister.matchLogToEntries,
+                          matchAfter=matchAfter + 1,
+                          entries=newEntries)
 
-        self.assertTrue(result)
-        self.assertEquals(persister.log, untouchedEntries + conflictingEntries)
-        self.assertEquals(persister.lastIndex, numberOfEntries - 1)
+    def test_matchLogEntries_deletesConflictingEntries(self):
+        '''A ListPersist should delete entries from its log that conflict with
+        incoming entries.'''
+        # all ranges for which this could conflict
+        for matchAfter in range(0, len(self.firstEntries)):
+            current = self.firstEntries
+            appended = self.appendedEntries
+            persister = self._test_matchLogToEntries(currentEntries=current,
+                                                     matchAfter=matchAfter,
+                                                     newEntries=appended,
+                                                     expectedEntries=appended)
+            cutOff = matchAfter + 1
+            self.assertEqual(persister.log, current[:cutOff])
+
+    def test_matchLogEntries_skipsMatchingEntries(self):
+        '''A ListPersist should skip all overlapping entries'''
+        for matchAfter in range(-1, len(self.firstEntries)):
+            current = self.firstEntries
+            appended = self.firstEntries[matchAfter + 1:]
+            persister = self._test_matchLogToEntries(currentEntries=current,
+                                                     matchAfter=matchAfter,
+                                                     newEntries=appended,
+                                                     expectedEntries=[])
+            self.assertEqual(persister.log, current)
+
+    def test_matchLogEntries_overwritesConflictingEntries(self):
+        '''A ListPersist should delete conflicting entries and skip over
+        matching ones.'''
+        # This is a basic sanity test to ensure that
+        # deletesConflictingEntries and skipsMatchingEntries compose
+        # correctly
+        current = self.firstEntries
+        partiallyConflicts = self.firstEntries[:2] + self.appendedEntries
+        expected = self.appendedEntries
+        matchAfter = -1
+        persister = self._test_matchLogToEntries(currentEntries=current,
+                                                 matchAfter=matchAfter,
+                                                 newEntries=partiallyConflicts,
+                                                 expectedEntries=expected)
+        self.assertEquals(persister.log, self.firstEntries[:2])
