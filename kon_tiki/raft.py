@@ -99,7 +99,7 @@ class StartsElection(Server):
                                                          Candidate)
 
     def appendEntries(self, *args, **kwargs):
-        self.resetElectionTimeout
+        self.resetElectionTimeout()
         return super(StartsElection, self).appendEntries(*args, **kwargs)
 
 
