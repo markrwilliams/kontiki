@@ -1,7 +1,7 @@
 '''An implementation of the Raft consensus algorithm'''
 from kon_tiki.persist import LogEntry
 from kon_tiki.fundamentals import median
-from twisted.internet import reactor
+from twisted.internet import reactor, defer
 from twisted.spread import pb
 import random
 
@@ -29,10 +29,12 @@ class Server(object):
         self.electionTimeoutRange = electionTimeoutRange
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
+        self.pending = set()
         self.applyCommitted()
 
     @classmethod
     def fromServer(cls, electionTimeoutRange, cycle, server):
+        server.cancel_all()
         return cls(electionTimeoutRange=electionTimeoutRange,
                    cycle=server.cycle,
                    identity=server.identity,
@@ -40,6 +42,18 @@ class Server(object):
                    persister=server.persister,
                    commitIndex=server.commitIndex,
                    lastApplied=server.lastApplied)
+
+    def defer(self, deferred):
+        def remove(result):
+            self.pending.remove(deferred)
+            return result
+
+        deferred.addCallbacks(remove, remove)
+        return deferred
+
+    def cancel_all(self):
+        for deferred in self.pending:
+            deferred.cancel()
 
     def applyCommitted(self):
         if self.lastApplied < self.commitIndex:
@@ -94,9 +108,10 @@ class StartsElection(Server):
         if self.votingDeferred is not None:
             self.votingDeferred.cancel()
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
-        self.becomeCandidateDeferred = reactor.callLater(self.electionTimeout,
-                                                         self.cycle.changeState,
-                                                         Candidate)
+        d = self.defer(reactor.callLater(self.electionTimeout,
+                                         self.cycle.changeState,
+                                         Candidate))
+        self.becomeCandidateDeferred = d
 
     def appendEntries(self, *args, **kwargs):
         self.resetElectionTimeout()
@@ -137,7 +152,9 @@ class Follower(Server):
         return self.currentTerm, success
 
     def remote_command(self, command):
-        return self.peers[self.leaderId].pb.callRemote('command', command)
+        d = self.defer(self.peers[self.leaderId].pb.callRemote('command',
+                                                               command))
+        return d
 
 
 class Candidate(StartsElection):
@@ -155,6 +172,10 @@ class Candidate(StartsElection):
             return True
         return False
 
+    def conductElection(self):
+        self.prepareForElection()
+        defer.gatherResults()
+
 
 class Leader(Server):
     '''A Raft leader.'''
@@ -163,8 +184,9 @@ class Leader(Server):
         super(Server, self).__init__(*args, **kwargs)
         self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
         self.postElection()
-        self.heartbeatLoopingCall = reactor.loopingCall(self.heartbeatInterval,
-                                                        self.broadcastAppendEntries)
+        d = self.defer(reactor.loopingCall(self.heartbeatInterval,
+                                           self.broadcastAppendEntries))
+        self.heartbeatLoopingCall = d
 
     def postElection(self):
         lastLogIndex = self.persister.lastLogIndex
@@ -197,12 +219,12 @@ class Leader(Server):
         prevLogTerm, entries = allEntries[0], allEntries[1:]
         lastLogIndex = self.persister.lastLogIndex
 
-        d = pb.call('appendEntries',
-                    term=self.persister.currentTerm,
-                    candidateId=self.identity,
-                    prevLogIndex=prevLogIndex,
-                    prevLogTerm=prevLogTerm,
-                    entries=entries)
+        d = self.defer(pb.call('appendEntries',
+                               term=self.persister.currentTerm,
+                               candidateId=self.identity,
+                               prevLogIndex=prevLogIndex,
+                               prevLogTerm=prevLogTerm,
+                               entries=entries))
 
         d.addCallback(self.receiveAppendEntries,
                       identity=identity,
