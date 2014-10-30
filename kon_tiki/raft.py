@@ -1,8 +1,10 @@
 '''An implementation of the Raft consensus algorithm'''
+from kon_tiki.fundamentals import median
 import operator
-from twisted.internet import reactor, defer
+from twisted.internet import reactor
 from twisted.spread import pb
 from collections import namedtuple
+import random
 
 
 LogEntry = namedtuple('LogEntry', 'term command')
@@ -94,17 +96,17 @@ class Server(object):
 
     `applyCommand`: callable invoked with the command to apply
      '''
-    nextState = None
 
-    def __init__(self, identity, peers, persister, applyCommand,
+    def __init__(self, cycle, identity, peers, persister, applyCommand,
                  commitIndex=0, lastApplied=0):
+        self.cycle = cycle
         self.identity = identity
         self.peers = peers
         self.persister = persister
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
         self.applyCommand = applyCommand
-        self.applyCommited()
+        self.applyCommitted()
 
     def applyCommitted(self):
         if self.lastApplied < self.commitIndex:
@@ -116,9 +118,7 @@ class Server(object):
     def willBecomeFollower(self, term):
         if term > self.persister.currentTerm:
             self.persister.currentTerm = term
-            self.nextState = (Follower
-                              if not isinstance(self, Follower)
-                              else None)
+            self.cycle.changeState(Follower.fromServer)
             return True
         return False
 
@@ -155,36 +155,42 @@ class Server(object):
         return self.persister.currentTerm, voteGranted
 
 
-class Candidate(Server):
+class StartsElection(Server):
 
-    def prepareForElection(self):
-        self.persister.currentTerm += 1
-        self.persister.votedFor = self.identity
+    def __init__(self, electionTimeoutRange, *args, **kwargs):
+        super(StartsElection, self).__init__(*args, **kwargs)
+        self.electionTimeoutRange = electionTimeoutRange
+        self.electionTimeout = None
+        self.becomeCandidateDeferred = None
+        self.resetElectionTimeout()
 
-    def willBecomeLeader(self, votesSoFar):
-        if votesSoFar > len(self.peers) / 2 + 1:
-            self.next_state = Leader
-            return True
-        return False
+    def resetElectionTimeout(self):
+        if self.votingDeferred is not None:
+            self.votingDeferred.cancel()
+        self.electionTimeout = random.uniform(*self.electionTimeoutRange)
+        self.becomeCandidateDeferred = reactor.callLater(self.electionTimeout,
+                                                         self.cycle.changeState,
+                                                         Candidate)
 
-
-class Leader(Server):
-    '''A Raft leader.'''
-
-    def __init__(self, *args, **kwargs):
-        super(Server, self).__init__(*args, **kwargs)
-        self.postElection()
-
-    def postElection(self):
-        lastLogIndex = len(self.persister.logs())
-        self.nextIndex = dict.fromkeys(self.peer, lastLogIndex)
-        self.matchIndex = dict.fromkeys(self.peers, 0)
+    def appendEntries(self, *args, **kwargs):
+        self.resetElectionTimeout
+        return super(StartsElection, self).appendEntries(*args, **kwargs)
 
 
 class Follower(Server):
     '''A Raft follower.'''
 
     leaderId = None
+
+    @classmethod
+    def fromServer(cls, electionTimeoutRange, cycle, server):
+        return cls(electionTimeoutRange=electionTimeoutRange,
+                   cycle=server.cycle,
+                   identity=server.identity,
+                   peers=server.peers,
+                   persister=server.persister,
+                   commitIndex=server.commitIndex,
+                   lastApplied=server.lastApplied)
 
     def remote_appendEntries(self,
                              term, leaderId, prevLogIndex,
@@ -210,8 +216,87 @@ class Follower(Server):
 
             self.leaderId = leaderId
             success = True
+            self.resetElectionTimeout()
 
         return self.currentTerm, success
+
+
+class Candidate(StartsElection):
+
+    def prepareForElection(self):
+        self.persister.currentTerm += 1
+        self.persister.votedFor = self.identity
+
+    def willBecomeLeader(self, votesSoFar):
+        if votesSoFar > len(self.peers) / 2 + 1:
+            self.cycle.changeState(Leader.fromCandidate)
+            return True
+        return False
+
+
+class Leader(Server):
+    '''A Raft leader.'''
+
+    @classmethod
+    def fromCandidate(cls, electionTimeoutRange, cycle, candidate):
+        return cls(cycle=candidate.cycle,
+                   identity=candidate.identity,
+                   peers=candidate.peers,
+                   persister=candidate.persister,
+                   commitIndex=candidate.commitIndex,
+                   lastApplied=candidate.lastApplied)
+
+    def __init__(self, *args, **kwargs):
+        super(Server, self).__init__(*args, **kwargs)
+        self.postElection()
+
+    def postElection(self):
+        lastLogIndex = self.persister.lastLogIndex
+        identities = [peer.identity for peer in self.peers]
+        self.nextIndex = dict.fromkeys(identities, lastLogIndex + 1)
+        self.matchIndex = dict.fromkeys(identities, 0)
+
+    def updateCommitIndex(self):
+        newCommitIndex = median(self.matchIndex.values())
+        if newCommitIndex > self.commitIndex:
+            self.commitIndex = newCommitIndex
+            return True
+        return False
+
+    def receiveAppendEntry(self, result, identity, lastLogIndex):
+        term, success = result
+        if self.currentTerm < term:
+            self.willBecomeFollower()
+        elif not success:
+            self.nextIndex[identity] -= 1
+            # retry
+        else:
+            self.nextIndex[identity] = lastLogIndex + 1
+            self.matchIndex[identity] = lastLogIndex
+            if self.updateCommitIndex():
+                self.applyCommitted()
+
+    def sendAppendEntry(self, peer):
+        prevLogIndex = self.nextIndex[peer.identity] - 1
+        allEntries = self.persister.logSlice(start=prevLogIndex, end=None)
+        prevLogTerm, entries = allEntries[0], allEntries[1:]
+        lastLogIndex = self.persister.lastLogIndex
+
+        d = peer.pb.call('appendEntries',
+                         term=self.persister.currentTerm,
+                         candidateId=self.identity,
+                         prevLogIndex=prevLogIndex,
+                         prevLogTerm=prevLogTerm,
+                         entries=entries)
+
+        d.addCallback(self.receiveAppendEntry,
+                      identity=peer.identity,
+                      lastLogIndex=lastLogIndex)
+        return d
+
+    def sendAppendEntries(self):
+        for peer in self.peers:
+            self.sendAppendEntry(peer)
 
 
 class ServerCycle(pb.Root):
@@ -223,33 +308,36 @@ class ServerCycle(pb.Root):
         self.persister = persister
         self.applyCommand = applyCommand
         self.electionTimeoutRange = electionTimeoutRange
-        self.state = Follower(identity, peers, persister, applyCommand)
+        self.state = Follower(cycle=self,
+                              identity=identity,
+                              peers=peers,
+                              persister=persister,
+                              applyCommand=applyCommand)
 
-    def resetElectionTimer(self):
-        self.electionTimeout = random.randrange(*self.electionTimeout)
-        reactor.callLater(random.uniform(*self.electionTimeout),
-                          self.electionTimeout)
+    def changeState(self, newStateFactory):
+        self.state = newStateFactory(self.electionTimeoutRange,
+                                     cycle=self,
+                                     server=self.state)
 
-    def electionTimeout(self):
-        self.reactor.callLater
-        self.state = Candidate(self.state.identity,
-                               self.state.peers,
-                               self.state.persister,
-                               self.state.applyCommand,
-                               self.state.commitIndex,
-                               self.state.lastApplied)
-        for peer in self.peers:
-            pass
+    def rerun(self, methodName, *args, **kwargs):
+        result = RERUN_RPC
+        while result is RERUN_RPC:
+            method = getattr(self.state, methodName)
+            result = method(*args, **kwargs)
+        return result
 
     def remote_appendEntries(self,
                              term, leaderId, prevLogIndex,
                              prevLogTerm, entries, leaderCommit):
-        return self.state.remote_appendEntries(term, leaderId,
-                                               prevLogIndex,
-                                               prevLogTerm,
-                                               entries,
-                                               leaderCommit)
+        return self.rereun('remote_appendEntries',
+                           term, leaderId,
+                           prevLogIndex,
+                           prevLogTerm,
+                           entries,
+                           leaderCommit)
 
     def remote_requestVote(self,
                            term, candidateId, lastLogIndex, lastLogTerm):
-        pass
+        return self.rerun('remote_requestVote',
+                          term, candidateId,
+                          lastLogIndex, lastLogIndex)
