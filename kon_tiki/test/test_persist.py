@@ -1,4 +1,4 @@
-from kon_tiki import raft
+from kon_tiki import persist
 from twisted.trial import unittest
 
 
@@ -8,23 +8,23 @@ class ListPersistTestCase(unittest.TestCase):
     or mixin...
     '''
 
-    firstEntries = [raft.LogEntry(term=0, command='first1'),
-                    raft.LogEntry(term=0, command='first2'),
-                    raft.LogEntry(term=1, command='first3')]
-    appendedEntries = [raft.LogEntry(term=2, command='append1'),
-                       raft.LogEntry(term=3, command='append2')]
+    firstEntries = [persist.LogEntry(term=0, command='first1'),
+                    persist.LogEntry(term=0, command='first2'),
+                    persist.LogEntry(term=1, command='first3')]
+    appendedEntries = [persist.LogEntry(term=2, command='append1'),
+                       persist.LogEntry(term=3, command='append2')]
 
     def test_init(self):
         '''A new ListPersist should have its state variables initialized as
         though it is a Server's first boot.
         '''
-        persister = raft.ListPersist()
+        persister = persist.ListPersist()
         self.assertEqual(persister.currentTerm, 0)
         self.assertEqual(persister.votedFor, None)
         self.assertFalse(persister.log)
 
     def emptyListPersist(self):
-        persister = raft.ListPersist()
+        persister = persist.ListPersist()
         self.assertFalse(persister.log)
         self.assertEqual(persister.lastIndex, -1)
         return persister
@@ -88,7 +88,7 @@ class ListPersistTestCase(unittest.TestCase):
                                                  newEntries=entries,
                                                  expectedEntries=entries)
 
-        self.assertRaises(raft.MatchAfterTooHigh,
+        self.assertRaises(persist.MatchAfterTooHigh,
                           persister.matchLogToEntries,
                           matchAfter=matchAfter + 1,
                           entries=self.firstEntries)
@@ -105,7 +105,7 @@ class ListPersistTestCase(unittest.TestCase):
                                                  newEntries=newEntries,
                                                  expectedEntries=newEntries)
 
-        self.assertRaises(raft.MatchAfterTooHigh,
+        self.assertRaises(persist.MatchAfterTooHigh,
                           persister.matchLogToEntries,
                           matchAfter=matchAfter + 1,
                           entries=newEntries)
