@@ -49,8 +49,29 @@ class RaftServerTest(unittest.TestCase):
 
         server.persister.currentTerm = currentTerm
         server.persister.log = log
-        print server.candidateLogUpToDate(lastLogIndex=len(log),
+        res = server.candidateLogUpToDate(lastLogIndex=len(log),
                                           lastLogTerm=currentTerm)
+        self.assertTrue(res)
+
+        # Index is higher
+        res = server.candidateLogUpToDate(lastLogIndex=len(log)+1,
+                                          lastLogTerm=currentTerm)
+        self.assertTrue(res)
+
+        # Term is higher
+        res = server.candidateLogUpToDate(lastLogIndex=len(log),
+                                          lastLogTerm=currentTerm+1)
+        self.assertTrue(res)
+
+        # Index is lower
+        res = server.candidateLogUpToDate(lastLogIndex=len(log)-2,
+                                          lastLogTerm=currentTerm)
+        self.assertFalse(res)
+
+        # Term is lower
+        res = server.candidateLogUpToDate(lastLogIndex=len(log),
+                                          lastLogTerm=currentTerm-1)
+        self.assertFalse(res)
 
 
     def test_requestVote(self):
