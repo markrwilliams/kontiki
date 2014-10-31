@@ -168,7 +168,7 @@ class Candidate(StartsElection):
         self.votes = 0
 
     def willBecomeLeader(self, votesSoFar):
-        if votesSoFar > len(self.peers) / 2 + 1:
+        if votesSoFar >= len(self.peers) / 2 + 1:
             self.cycle.changeState(Leader)
             return True
         return False
