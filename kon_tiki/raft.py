@@ -164,6 +164,7 @@ class Candidate(StartsElection):
     def prepareForElection(self):
         self.persister.currentTerm += 1
         self.persister.votedFor = self.identity
+        self.votes = 0
 
     def willBecomeLeader(self, votesSoFar):
         if votesSoFar > len(self.peers) / 2 + 1:
@@ -171,9 +172,36 @@ class Candidate(StartsElection):
             return True
         return False
 
+    def completeRequestVote(self, result):
+        term, voteGranted = result
+        if self.willBecomeFollower(term):
+            return
+        elif voteGranted:
+            self.willBecomeLeader(self.votes)
+
+    def sendRequestVote(self, peer):
+        term = self.persister.currentTerm
+        lastLogIndex = self.persister.lastLogIndex
+        lastLogTerm = self.logSlice(lastLogIndex - 1)
+        if lastLogTerm:
+            (lastLogTerm,) = lastLogTerm
+        else:
+            lastLogTerm = 0
+        d = self.defer(peer.pb.call('requestVote',
+                                    term,
+                                    self.identity,
+                                    lastLogIndex,
+                                    lastLogTerm))
+        d.addCallback(self.completeRequestVote)
+        return d
+
     def conductElection(self):
         self.prepareForElection()
-        defer.gatherResults()
+        for peer in self.peers:
+            self.sendRequestVote(peer)
+
+    def remote_appendEntries(self, *args, **kwargs):
+        return self.currentTerm, False
 
 
 class Leader(Server):
@@ -199,7 +227,7 @@ class Leader(Server):
             return True
         return False
 
-    def receiveAppendEntries(self, result, identity, lastLogIndex):
+    def completeAppendEntries(self, result, identity, lastLogIndex):
         term, success = result
         if self.currentTerm < term:
             self.willBecomeFollower()
@@ -225,7 +253,7 @@ class Leader(Server):
                                prevLogTerm=prevLogTerm,
                                entries=entries))
 
-        d.addCallback(self.receiveAppendEntries,
+        d.addCallback(self.completeAppendEntries,
                       identity=identity,
                       lastLogIndex=lastLogIndex)
         return d
