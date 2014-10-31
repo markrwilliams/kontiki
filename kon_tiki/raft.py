@@ -175,9 +175,7 @@ class Candidate(StartsElection):
 
     def completeRequestVote(self, result):
         term, voteGranted = result
-        if self.willBecomeFollower(term):
-            return
-        elif voteGranted:
+        if not self.willBecomeFollower(term) and voteGranted:
             self.willBecomeLeader(self.votes)
 
     def sendRequestVote(self, peer):
