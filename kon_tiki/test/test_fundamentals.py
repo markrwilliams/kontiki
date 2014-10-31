@@ -23,3 +23,5 @@ class FundamentalsTestCase(unittest.TestCase):
         self.assertEqual(fundamentals.median([1, 2]), 1)
         self.assertEqual(fundamentals.median([1, 2, 3]), 2)
         self.assertEqual(fundamentals.median([4, 4, 4]), 4)
+        self.assertEqual(fundamentals.median([1, 2, 3, 4, 6, 7]), 3)
+        self.assertEqual(fundamentals.median([1, 2, 3, 6, 7, 8, 9]), 6)
