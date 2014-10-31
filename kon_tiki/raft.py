@@ -75,8 +75,7 @@ class Server(object):
 
     def candidateLogUpToDate(self, lastLogIndex, lastLogTerm):
         # Section 5.4.1
-        if self.persister.indexMatchesTerm(index=self.persister.lastIndex,
-                                           term=lastLogTerm):
+        if self.persister.currentTerm == lastLogTerm:
             return self.persister.lastIndex <= lastLogIndex
         else:
             return self.persister.lastIndexNewerThanTerm(lastLogTerm)
