@@ -194,10 +194,13 @@ class Candidate(StartsElection):
         d.addCallback(self.completeRequestVote)
         return d
 
+    def broadcastRequestVote(self):
+        for peer in self.peers.values():
+            self.sendRequestVote(peer)
+
     def conductElection(self):
         self.prepareForElection()
-        for peer in self.peers:
-            self.sendRequestVote(peer)
+        self.broadcastRequestVote()
 
     def remote_appendEntries(self, *args, **kwargs):
         return self.persister.currentTerm, False
