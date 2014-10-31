@@ -79,17 +79,23 @@ class RaftServerTest(unittest.TestCase):
         Do I give you a vote? It depends.
 
         1) Is your term less than mine? If so, the answer is no.
-        2) Have I voted for you before, and candidate log is up to date
+        2) Have I voted for you before, and candidate log is up to date?
+        Then yes
         """
         server = self.create_server()
 
         currentTerm = 100
         candidateId = 'ThisCandidate'
         lastLogIndex = 10
-        lastLogTerm = 100
+        lastLogTerm = currentTerm
 
-        # Test for term
-        server.persister.currentTerm = 101
+        log = []
+        for x in xrange(10):
+            log.append(persist.LogEntry(term=currentTerm, command=x))
+        server.persister.log = log
+
+        # Test for term less then (case 1)
+        server.persister.currentTerm = currentTerm + 1
         term, vg = server.remote_requestVote(term=currentTerm,
                                              candidateId=candidateId,
                                              lastLogIndex=lastLogIndex,
@@ -97,4 +103,28 @@ class RaftServerTest(unittest.TestCase):
         self.assertEquals(term, 101)
         self.assertFalse(vg)
 
+        # Test for success (never voted before)
+        server.persister.currentTerm = currentTerm
+        term, vg = server.remote_requestVote(term=currentTerm,
+                                             candidateId=candidateId,
+                                             lastLogIndex=lastLogIndex,
+                                             lastLogTerm=lastLogTerm)
+        self.assertTrue(vg)
+        self.assertEquals(server.persister.votedFor, candidateId)
+        self.assertEquals(type(server.cycle.state), raft.Follower)
+
+        # Test for success (voted before)
+        server.persister.votedFor = candidateId
+        term, vg = server.remote_requestVote(term=currentTerm,
+                                             candidateId=candidateId,
+                                             lastLogIndex=lastLogIndex,
+                                             lastLogTerm=lastLogTerm)
+        self.assertTrue(vg)
+
+        # Test for failure (voted before, but fell behind)
+        term, vg = server.remote_requestVote(term=currentTerm,
+                                             candidateId=candidateId,
+                                             lastLogIndex=lastLogIndex,
+                                             lastLogTerm=lastLogTerm-1)
+        self.assertFalse(vg)
         
