@@ -127,7 +127,7 @@ class Follower(Server):
                              prevLogTerm, entries, leaderCommit):
         # RPC
         # 1 & 2
-        if (term < self.currentTerm
+        if (term < self.persister.currentTerm
             or not self.persister.indexMatchesTerm(prevLogIndex,
                                                    prevLogTerm)):
             success = False
@@ -148,7 +148,7 @@ class Follower(Server):
             success = True
             self.resetElectionTimeout()
 
-        return self.currentTerm, success
+        return self.persister.currentTerm, success
 
     def remote_command(self, command):
         d = self.defer(self.peers[self.leaderId].pb.callRemote('command',
@@ -160,6 +160,7 @@ class Candidate(StartsElection):
 
     def __init__(self, *args, **kwargs):
         super(Candidate, self).__init__(*args, **kwargs)
+        self.conductElection()
 
     def prepareForElection(self):
         self.persister.currentTerm += 1
@@ -201,7 +202,7 @@ class Candidate(StartsElection):
             self.sendRequestVote(peer)
 
     def remote_appendEntries(self, *args, **kwargs):
-        return self.currentTerm, False
+        return self.persister.currentTerm, False
 
 
 class Leader(Server):
@@ -229,7 +230,7 @@ class Leader(Server):
 
     def completeAppendEntries(self, result, identity, lastLogIndex):
         term, success = result
-        if self.currentTerm < term:
+        if self.persister.currentTerm < term:
             self.willBecomeFollower()
         elif not success:
             self.nextIndex[identity] -= 1
