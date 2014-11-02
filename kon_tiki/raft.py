@@ -43,7 +43,7 @@ class Server(object):
                    commitIndex=server.commitIndex,
                    lastApplied=server.lastApplied)
 
-    def defer(self, deferred):
+    def track(self, deferred):
         def remove(result):
             self.pending.remove(deferred)
             return result
@@ -102,17 +102,24 @@ class Server(object):
 
 
 class StartsElection(Server):
+    becomeCandidateDeferred = None
+
+    def __init__(self, *args, **kwargs):
+        super(StartsElection, self).__init__(*args, **kwargs)
+        self.resetElectionTimeout()
 
     def resetElectionTimeout(self):
-        if self.votingDeferred is not None:
-            self.votingDeferred.cancel()
+        if (self.becomeCandidateDeferred is not None
+            and self.becomeCandidateDeferred.active()):
+            self.becomeCandidateDeferred.cancel()
+
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
-        d = self.defer(reactor.callLater(self.electionTimeout,
+        d = self.track(reactor.callLater(self.electionTimeout,
                                          self.cycle.changeState,
                                          Candidate))
         self.becomeCandidateDeferred = d
 
-    def appendEntries(self, *args, **kwargs):
+    def remote_appendEntries(self, *args, **kwargs):
         self.resetElectionTimeout()
         return super(StartsElection, self).appendEntries(*args, **kwargs)
 
@@ -151,7 +158,7 @@ class Follower(Server):
         return self.persister.currentTerm, success
 
     def remote_command(self, command):
-        d = self.defer(self.peers[self.leaderId].pb.callRemote('command',
+        d = self.track(self.peers[self.leaderId].pb.callRemote('command',
                                                                command))
         return d
 
@@ -186,7 +193,7 @@ class Candidate(StartsElection):
             (lastLogTerm,) = lastLogTerm
         else:
             lastLogTerm = 0
-        d = self.defer(peer.pb.call('requestVote',
+        d = self.track(peer.pb.call('requestVote',
                                     term,
                                     self.identity,
                                     lastLogIndex,
@@ -213,7 +220,7 @@ class Leader(Server):
         super(Server, self).__init__(*args, **kwargs)
         self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
         self.postElection()
-        d = self.defer(reactor.loopingCall(self.heartbeatInterval,
+        d = self.track(reactor.loopingCall(self.heartbeatInterval,
                                            self.broadcastAppendEntries))
         self.heartbeatLoopingCall = d
 
@@ -248,7 +255,7 @@ class Leader(Server):
         prevLogTerm, entries = allEntries[0], allEntries[1:]
         lastLogIndex = self.persister.lastLogIndex
 
-        d = self.defer(pb.call('appendEntries',
+        d = self.track(pb.call('appendEntries',
                                term=self.persister.currentTerm,
                                candidateId=self.identity,
                                prevLogIndex=prevLogIndex,
