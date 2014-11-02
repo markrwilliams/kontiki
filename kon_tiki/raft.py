@@ -158,8 +158,8 @@ class Follower(Server):
         return self.persister.currentTerm, success
 
     def remote_command(self, command):
-        d = self.track(self.peers[self.leaderId].pb.callRemote('command',
-                                                               command))
+        d = self.track(self.peers[self.leaderId].callRemote('command',
+                                                            command))
         return d
 
 
@@ -185,7 +185,7 @@ class Candidate(StartsElection):
         if not self.willBecomeFollower(term) and voteGranted:
             self.willBecomeLeader(self.votes)
 
-    def sendRequestVote(self, peer):
+    def sendRequestVote(self, perspective):
         term = self.persister.currentTerm
         lastLogIndex = self.persister.lastLogIndex
         lastLogTerm = self.logSlice(lastLogIndex - 1)
@@ -193,17 +193,17 @@ class Candidate(StartsElection):
             (lastLogTerm,) = lastLogTerm
         else:
             lastLogTerm = 0
-        d = self.track(peer.pb.call('requestVote',
-                                    term,
-                                    self.identity,
-                                    lastLogIndex,
-                                    lastLogTerm))
+        d = self.track(perspective.callRemote('requestVote',
+                                              term,
+                                              self.identity,
+                                              lastLogIndex,
+                                              lastLogTerm))
         d.addCallback(self.completeRequestVote)
         return d
 
     def broadcastRequestVote(self):
-        for peer in self.peers.values():
-            self.sendRequestVote(peer)
+        for perspective in self.peers.values():
+            self.sendRequestVote(perspective)
 
     def conductElection(self):
         self.prepareForElection()
@@ -249,18 +249,18 @@ class Leader(Server):
             if self.updateCommitIndex():
                 self.applyCommitted()
 
-    def sendAppendEntries(self, identity, pb):
+    def sendAppendEntries(self, identity, perspective):
         prevLogIndex = self.nextIndex[identity] - 1
         allEntries = self.persister.logSlice(start=prevLogIndex, end=None)
         prevLogTerm, entries = allEntries[0], allEntries[1:]
         lastLogIndex = self.persister.lastLogIndex
 
-        d = self.track(pb.call('appendEntries',
-                               term=self.persister.currentTerm,
-                               candidateId=self.identity,
-                               prevLogIndex=prevLogIndex,
-                               prevLogTerm=prevLogTerm,
-                               entries=entries))
+        d = self.track(perspective.callRemote('appendEntries',
+                                              term=self.persister.currentTerm,
+                                              candidateId=self.identity,
+                                              prevLogIndex=prevLogIndex,
+                                              prevLogTerm=prevLogTerm,
+                                              entries=entries))
 
         d.addCallback(self.completeAppendEntries,
                       identity=identity,
@@ -268,8 +268,8 @@ class Leader(Server):
         return d
 
     def broadcastAppendEntries(self):
-        for identity, pb in self.peers:
-            self.sendAppendEntries(pb)
+        for identity, perspective in self.peers:
+            self.sendAppendEntries(identity, perspective)
 
     def remote_command(self, command):
         self.persister.appendEntries([LogEntry(term=self.persister.currentTerm,
