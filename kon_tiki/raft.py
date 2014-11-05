@@ -1,4 +1,12 @@
-'''An implementation of the Raft consensus algorithm'''
+'''An implementation of the Raft consensus algorithm.
+
+References:
+
+[1] Ongaro, Diego and Ousterhout, John. "In Search of an
+   Understandable Consensus Algorithm (Extended Version)". May 2014
+   <https://ramcloud.stanford.edu/raft.pdf>
+
+'''
 from kon_tiki.persist import LogEntry
 from kon_tiki.fundamentals import median
 from twisted.internet import reactor, defer
@@ -229,6 +237,7 @@ class Leader(Server):
     clock = reactor
 
     def begin(self):
+        # see Section 5.6, "Timing and availability" in [1]
         self.heartbeatInterval = min(self.electionTimeoutRange[0] / 10.0, 0.02)
         self.postElection()
 
