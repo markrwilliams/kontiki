@@ -49,6 +49,7 @@ class Server(object):
             return result
 
         deferred.addCallbacks(remove, remove)
+        self.pending.add(deferred)
         return deferred
 
     def cancel_all(self):
