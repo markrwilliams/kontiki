@@ -1,6 +1,7 @@
 from kon_tiki import raft
 from kon_tiki import persist
 from twisted.trial import unittest
+from twisted.internet import task
 
 
 class RaftCandidateTest(unittest.TestCase):
@@ -22,7 +23,8 @@ class RaftCandidateTest(unittest.TestCase):
         candidate = raft.Candidate(identity=identity, cycle=cycle,
                                    peers=peers, applyCommand=applyCommand,
                                    electionTimeoutRange=timeoutRange,
-                                   persister=persister)
+                                   persister=persister,
+                                   _clock=task.Clock())
         return candidate
 
     def test_prepareForElection(self):

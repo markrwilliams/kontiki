@@ -103,22 +103,30 @@ class Server(object):
 
 
 class StartsElection(Server):
-    becomeCandidateDeferred = None
+    becomeCandidateTimeout = None
 
     def __init__(self, *args, **kwargs):
+        clock = kwargs.pop('_clock', reactor)
         super(StartsElection, self).__init__(*args, **kwargs)
+        self.clock = clock
         self.resetElectionTimeout()
 
-    def resetElectionTimeout(self):
-        if (self.becomeCandidateDeferred is not None
-            and self.becomeCandidateDeferred.active()):
-            self.becomeCandidateDeferred.cancel()
+    def cancelBecomeCandidateTimeout(self):
+        if (self.becomeCandidateTimeout is not None
+           and self.becomeCandidateTimeout.active()):
+            self.becomeCandidateTimeout.cancel()
 
+    def cancelAll(self):
+        self.cancelBecomeCandidateTimeout()
+        super(StartsElection, self).cancelAll()
+
+    def resetElectionTimeout(self):
+        self.cancelBecomeCandidateTimeout()
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
-        d = self.track(reactor.callLater(self.electionTimeout,
-                                         self.cycle.changeState,
-                                         Candidate))
-        self.becomeCandidateDeferred = d
+        d = self.clock.callLater(self.electionTimeout,
+                                 self.cycle.changeState,
+                                 Candidate)
+        self.becomeCandidateTimeout = d
 
     def remote_appendEntries(self, *args, **kwargs):
         self.resetElectionTimeout()
@@ -216,16 +224,24 @@ class Candidate(StartsElection):
 
 class Leader(Server):
     '''A Raft leader.'''
+    heartbeatLoopingCall = None
 
     def __init__(self, *args, **kwargs):
+        clock = kwargs.pop('_clock', reactor)
         super(Server, self).__init__(*args, **kwargs)
         self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
-        self.postElection()
-        d = self.track(reactor.loopingCall(self.heartbeatInterval,
-                                           self.broadcastAppendEntries))
+        self.postElection(clock)
+
+    def cancelAll(self):
+        if self.heartbeatLoopingCall:
+            self.heartbeatLoopingCall.stop()
+        super(Leader, self).cancelAll()
+
+    def postElection(self, clock=reactor):
+        d = clock.loopingCall(self.heartbeatInterval,
+                              self.broadcastAppendEntries)
         self.heartbeatLoopingCall = d
 
-    def postElection(self):
         lastLogIndex = self.persister.lastLogIndex
         self.nextIndex = dict.fromkeys(self.peers, lastLogIndex + 1)
         self.matchIndex = dict.fromkeys(self.peers, 0)
