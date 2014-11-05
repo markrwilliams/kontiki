@@ -30,7 +30,6 @@ class Server(object):
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
         self.pending = set()
-        self.applyCommitted()
 
     @classmethod
     def fromServer(cls, electionTimeoutRange, cycle, server):
@@ -42,6 +41,9 @@ class Server(object):
                    persister=server.persister,
                    commitIndex=server.commitIndex,
                    lastApplied=server.lastApplied)
+
+    def begin(self):
+        self.applyCommitted()
 
     def track(self, deferred):
         def remove(result):
@@ -104,11 +106,10 @@ class Server(object):
 
 class StartsElection(Server):
     becomeCandidateTimeout = None
+    clock = reactor
 
-    def __init__(self, *args, **kwargs):
-        clock = kwargs.pop('_clock', reactor)
-        super(StartsElection, self).__init__(*args, **kwargs)
-        self.clock = clock
+    def begin(self):
+        super(StartsElection, self).begin()
         self.resetElectionTimeout()
 
     def cancelBecomeCandidateTimeout(self):
@@ -174,8 +175,8 @@ class Follower(Server):
 
 class Candidate(StartsElection):
 
-    def __init__(self, *args, **kwargs):
-        super(Candidate, self).__init__(*args, **kwargs)
+    def begin(self):
+        super(Candidate, self).begin()
         self.conductElection()
 
     def prepareForElection(self):
@@ -225,21 +226,20 @@ class Candidate(StartsElection):
 class Leader(Server):
     '''A Raft leader.'''
     heartbeatLoopingCall = None
+    clock = reactor
 
-    def __init__(self, *args, **kwargs):
-        clock = kwargs.pop('_clock', reactor)
-        super(Server, self).__init__(*args, **kwargs)
+    def begin(self):
         self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
-        self.postElection(clock)
+        self.postElection()
 
     def cancelAll(self):
         if self.heartbeatLoopingCall:
             self.heartbeatLoopingCall.stop()
         super(Leader, self).cancelAll()
 
-    def postElection(self, clock=reactor):
-        d = clock.loopingCall(self.heartbeatInterval,
-                              self.broadcastAppendEntries)
+    def postElection(self):
+        d = self.clock.loopingCall(self.heartbeatInterval,
+                                   self.broadcastAppendEntries)
         self.heartbeatLoopingCall = d
 
         lastLogIndex = self.persister.lastLogIndex
@@ -311,10 +311,12 @@ class ServerCycle(pb.Root):
                               persister=persister,
                               applyCommand=applyCommand)
 
-    def changeState(self, newState):
+    def changeState(self, newState, begin=True):
         self.state = newState.fromServer(self.electionTimeoutRange,
                                          cycle=self,
                                          server=self.state)
+        if begin:
+            self.state.begin()
 
     def rerun(self, methodName, *args, **kwargs):
         result = RERUN_RPC

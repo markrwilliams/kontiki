@@ -19,12 +19,10 @@ class RaftCandidateTest(unittest.TestCase):
         def fake_conduct(*args):
             pass
 
-        self.patch(raft.Candidate, 'conductElection', fake_conduct)
         candidate = raft.Candidate(identity=identity, cycle=cycle,
                                    peers=peers, applyCommand=applyCommand,
                                    electionTimeoutRange=timeoutRange,
-                                   persister=persister,
-                                   _clock=task.Clock())
+                                   persister=persister)
         return candidate
 
     def test_prepareForElection(self):
