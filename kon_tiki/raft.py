@@ -229,7 +229,7 @@ class Leader(Server):
     clock = reactor
 
     def begin(self):
-        self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
+        self.heartbeatInterval = min(self.electionTimeoutRange[0] / 10.0, 0.02)
         self.postElection()
 
     def cancelAll(self):
