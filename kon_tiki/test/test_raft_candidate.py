@@ -14,8 +14,10 @@ class RaftCandidateTest(unittest.TestCase):
         cycle = raft.ServerCycle(identity=identity, peers=peers,
                                  applyCommand=applyCommand,
                                  persister=persister)
+
         def fake_conduct(*args):
             pass
+
         self.patch(raft.Candidate, 'conductElection', fake_conduct)
         candidate = raft.Candidate(identity=identity, cycle=cycle,
                                    peers=peers, applyCommand=applyCommand,
