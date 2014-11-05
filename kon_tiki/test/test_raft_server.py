@@ -33,7 +33,6 @@ class RaftServerTest(unittest.TestCase):
         server.persister.votedFor = 'some_ID'
         self.assertTrue(server.candidateIdOK(candidateId=ID))
 
-
     def test_candidateLogUpToDate(self):
         """
         Is the candidate up to date? The term and the index together
@@ -72,7 +71,6 @@ class RaftServerTest(unittest.TestCase):
         res = server.candidateLogUpToDate(lastLogIndex=len(log),
                                           lastLogTerm=currentTerm-1)
         self.assertFalse(res)
-
 
     def test_requestVote(self):
         """
@@ -127,4 +125,3 @@ class RaftServerTest(unittest.TestCase):
                                              lastLogIndex=lastLogIndex,
                                              lastLogTerm=lastLogTerm-1)
         self.assertFalse(vg)
-        
