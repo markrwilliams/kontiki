@@ -1,6 +1,7 @@
 '''An implementation of the Raft consensus algorithm'''
 from kon_tiki.persist import LogEntry
-from kon_tiki.fundamentals import median
+from kon_tiki.fundamentals import majorityMedian
+from twisted.python import log
 from twisted.internet import reactor, defer
 from twisted.spread import pb
 import random
@@ -34,7 +35,7 @@ class Server(object):
 
     @classmethod
     def fromServer(cls, electionTimeoutRange, cycle, server):
-        server.cancel_all()
+        server.cancelAll()
         return cls(electionTimeoutRange=electionTimeoutRange,
                    cycle=server.cycle,
                    identity=server.identity,
@@ -43,15 +44,19 @@ class Server(object):
                    commitIndex=server.commitIndex,
                    lastApplied=server.lastApplied)
 
+    def log_failure(self, failure, call):
+        log.msg("Call %s failed" % call, failure)
+
     def track(self, deferred):
         def remove(result):
             self.pending.remove(deferred)
             return result
 
+        self.pending.add(deferred)
         deferred.addCallbacks(remove, remove)
         return deferred
 
-    def cancel_all(self):
+    def cancelAll(self):
         for deferred in self.pending:
             deferred.cancel()
 
@@ -78,7 +83,7 @@ class Server(object):
         if self.persister.currentTerm == lastLogTerm:
             return self.persister.lastIndex <= lastLogIndex
         else:
-            return self.persister.lastIndexNewerThanTerm(lastLogTerm)
+            return self.persister.lastIndexLETerm(lastLogTerm)
 
     def remote_appendEntries(self,
                              term, leaderId, prevLogIndex,
@@ -108,15 +113,21 @@ class StartsElection(Server):
         super(StartsElection, self).__init__(*args, **kwargs)
         self.resetElectionTimeout()
 
-    def resetElectionTimeout(self):
-        if (self.becomeCandidateDeferred is not None
-            and self.becomeCandidateDeferred.active()):
+    def cancelBecomeCandidateDeferred(self):
+        if (self.becomeCandidateDeferred and
+           self.becomeCandidateDeferred.active()):
             self.becomeCandidateDeferred.cancel()
 
+    def cancelAll(self):
+        self.cancelBecomeCandidateDeferred()
+        super(StartsElection, self).cancelAll()
+
+    def resetElectionTimeout(self):
+        self.cancelBecomeCandidateDeferred()
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
-        d = self.track(reactor.callLater(self.electionTimeout,
-                                         self.cycle.changeState,
-                                         Candidate))
+        d = reactor.callLater(self.electionTimeout,
+                              self.cycle.changeState,
+                              Candidate)
         self.becomeCandidateDeferred = d
 
     def remote_appendEntries(self, *args, **kwargs):
@@ -160,6 +171,7 @@ class Follower(Server):
     def remote_command(self, command):
         d = self.track(self.peers[self.leaderId].callRemote('command',
                                                             command))
+        d.addErrback(self.log_failure, call="command")
         return d
 
 
@@ -199,6 +211,7 @@ class Candidate(StartsElection):
                                               lastLogIndex,
                                               lastLogTerm))
         d.addCallback(self.completeRequestVote)
+        d.addErrback(self.log_failure, call="requestVote")
         return d
 
     def broadcastRequestVote(self):
@@ -230,7 +243,7 @@ class Leader(Server):
         self.matchIndex = dict.fromkeys(self.peers, 0)
 
     def updateCommitIndex(self):
-        newCommitIndex = median(self.matchIndex.values())
+        newCommitIndex = majorityMedian(self.matchIndex.values())
         if newCommitIndex > self.commitIndex:
             self.commitIndex = newCommitIndex
             return True
@@ -265,6 +278,7 @@ class Leader(Server):
         d.addCallback(self.completeAppendEntries,
                       identity=identity,
                       lastLogIndex=lastLogIndex)
+        d.addErrback(self.log_failure, call="appendEntries")
         return d
 
     def broadcastAppendEntries(self):

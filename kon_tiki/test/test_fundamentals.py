@@ -16,12 +16,12 @@ class FundamentalsTestCase(unittest.TestCase):
         listOf10 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         self.assertEqual(fundamentals.nlargest(3, listOf10), [10, 9, 8])
 
-    def test_median(self):
-        self.assertRaises(ValueError, fundamentals.median, [])
+    def test_majorityMedian(self):
+        self.assertRaises(ValueError, fundamentals.majorityMedian, [])
 
-        self.assertEqual(fundamentals.median([1]), 1)
-        self.assertEqual(fundamentals.median([1, 2]), 1)
-        self.assertEqual(fundamentals.median([1, 2, 3]), 2)
-        self.assertEqual(fundamentals.median([4, 4, 4]), 4)
-        self.assertEqual(fundamentals.median([1, 2, 3, 4, 6, 7]), 3)
-        self.assertEqual(fundamentals.median([1, 2, 3, 6, 7, 8, 9]), 6)
+        self.assertEqual(fundamentals.majorityMedian([1]), 1)
+        self.assertEqual(fundamentals.majorityMedian([1, 2]), 1)
+        self.assertEqual(fundamentals.majorityMedian([1, 2, 3]), 2)
+        self.assertEqual(fundamentals.majorityMedian([4, 4, 4]), 4)
+        self.assertEqual(fundamentals.majorityMedian([1, 2, 3, 4, 6, 7]), 3)
+        self.assertEqual(fundamentals.majorityMedian([1, 2, 3, 6, 7, 8, 9]), 6)
