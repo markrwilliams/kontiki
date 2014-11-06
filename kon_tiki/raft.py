@@ -1,4 +1,12 @@
-'''An implementation of the Raft consensus algorithm'''
+'''An implementation of the Raft consensus algorithm.
+
+References:
+
+[1] Ongaro, Diego and Ousterhout, John. "In Search of an
+   Understandable Consensus Algorithm (Extended Version)". May 2014
+   <https://ramcloud.stanford.edu/raft.pdf>
+
+'''
 from kon_tiki.persist import LogEntry
 from kon_tiki.fundamentals import majorityMedian
 from twisted.python import log
@@ -31,7 +39,6 @@ class Server(object):
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
         self.pending = set()
-        self.applyCommitted()
 
     @classmethod
     def fromServer(cls, electionTimeoutRange, cycle, server):
@@ -47,6 +54,9 @@ class Server(object):
     def log_failure(self, failure, call):
         log.msg("Call %s failed" % call, failure)
 
+    def begin(self):
+        self.applyCommitted()
+
     def track(self, deferred):
         def remove(result):
             self.pending.remove(deferred)
@@ -54,6 +64,7 @@ class Server(object):
 
         self.pending.add(deferred)
         deferred.addCallbacks(remove, remove)
+        self.pending.add(deferred)
         return deferred
 
     def cancelAll(self):
@@ -107,28 +118,29 @@ class Server(object):
 
 
 class StartsElection(Server):
-    becomeCandidateDeferred = None
+    becomeCandidateTimeout = None
+    clock = reactor
 
-    def __init__(self, *args, **kwargs):
-        super(StartsElection, self).__init__(*args, **kwargs)
+    def begin(self):
+        super(StartsElection, self).begin()
         self.resetElectionTimeout()
 
-    def cancelBecomeCandidateDeferred(self):
-        if (self.becomeCandidateDeferred and
-           self.becomeCandidateDeferred.active()):
-            self.becomeCandidateDeferred.cancel()
+    def cancelBecomeCandidateTimeout(self):
+        if (self.becomeCandidateTimeout is not None
+           and self.becomeCandidateTimeout.active()):
+            self.becomeCandidateTimeout.cancel()
 
     def cancelAll(self):
-        self.cancelBecomeCandidateDeferred()
+        self.cancelBecomeCandidateTimeout()
         super(StartsElection, self).cancelAll()
 
     def resetElectionTimeout(self):
-        self.cancelBecomeCandidateDeferred()
+        self.cancelBecomeCandidateTimeout()
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
-        d = reactor.callLater(self.electionTimeout,
-                              self.cycle.changeState,
-                              Candidate)
-        self.becomeCandidateDeferred = d
+        d = self.clock.callLater(self.electionTimeout,
+                                 self.cycle.changeState,
+                                 Candidate)
+        self.becomeCandidateTimeout = d
 
     def remote_appendEntries(self, *args, **kwargs):
         self.resetElectionTimeout()
@@ -177,8 +189,8 @@ class Follower(Server):
 
 class Candidate(StartsElection):
 
-    def __init__(self, *args, **kwargs):
-        super(Candidate, self).__init__(*args, **kwargs)
+    def begin(self):
+        super(Candidate, self).begin()
         self.conductElection()
 
     def prepareForElection(self):
@@ -228,16 +240,24 @@ class Candidate(StartsElection):
 
 class Leader(Server):
     '''A Raft leader.'''
+    heartbeatLoopingCall = None
+    clock = reactor
 
-    def __init__(self, *args, **kwargs):
-        super(Server, self).__init__(*args, **kwargs)
-        self.heartbeatInterval = min(self.electionTimeoutRange[0] - 50, 50)
+    def begin(self):
+        # see Section 5.6, "Timing and availability" in [1]
+        self.heartbeatInterval = min(self.electionTimeoutRange[0] / 10.0, 0.02)
         self.postElection()
-        d = self.track(reactor.loopingCall(self.heartbeatInterval,
-                                           self.broadcastAppendEntries))
-        self.heartbeatLoopingCall = d
+
+    def cancelAll(self):
+        if self.heartbeatLoopingCall:
+            self.heartbeatLoopingCall.stop()
+        super(Leader, self).cancelAll()
 
     def postElection(self):
+        d = self.clock.loopingCall(self.heartbeatInterval,
+                                   self.broadcastAppendEntries)
+        self.heartbeatLoopingCall = d
+
         lastLogIndex = self.persister.lastLogIndex
         self.nextIndex = dict.fromkeys(self.peers, lastLogIndex + 1)
         self.matchIndex = dict.fromkeys(self.peers, 0)
@@ -308,10 +328,12 @@ class ServerCycle(pb.Root):
                               persister=persister,
                               applyCommand=applyCommand)
 
-    def changeState(self, newState):
+    def changeState(self, newState, begin=True):
         self.state = newState.fromServer(self.electionTimeoutRange,
                                          cycle=self,
                                          server=self.state)
+        if begin:
+            self.state.begin()
 
     def rerun(self, methodName, *args, **kwargs):
         result = RERUN_RPC
