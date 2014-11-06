@@ -107,8 +107,10 @@ class SQLitePersist(object):
     _currentTerm = _MISSING
     _votedFor = _MISSING
 
-    def __init__(self, path):
+    def __init__(self, path, poolMin=None, poolMax=None):
         self.path = path
+        self.poolMin = poolMin
+        self.poolMax = poolMax
 
     def prepareDatabaseAndConnection(self, connection):
         connection.row_factory = sqlite3.Row
@@ -128,9 +130,17 @@ class SQLitePersist(object):
 
     def connect(self):
         cf_openfun = self.prepareDatabaseAndConnection
+
+        kwargs = {}
+        if self.poolMin is not None:
+            kwargs['cp_min'] = self.poolMin
+        if self.poolMax is not None:
+            kwargs['cp_max'] = self.poolMin
+
         self.dbPool = adbapi.ConnectionPool('sqlite3', self.path,
                                             check_same_thread=False,
-                                            cp_openfun=cf_openfun)
+                                            cp_openfun=cf_openfun,
+                                            **kwargs)
     def getLastIndex(self):
         q = '''SELECT MAX(logIndex) AS lastIndex
                FROM raft_log'''
@@ -302,7 +312,7 @@ class SQLitePersist(object):
 
         return self.dbPool.runInteraction(match)
 
-    def appendEntries(self, entries):
+    def appendNewEntries(self, entries):
 
         def append(txn):
             insert = '''INSERT INTO raft_log

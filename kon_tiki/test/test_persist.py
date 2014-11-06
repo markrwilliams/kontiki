@@ -1,5 +1,4 @@
 from kon_tiki import persist
-from twisted.internet.defer import DeferredList
 from twisted.trial import unittest
 
 
@@ -158,7 +157,13 @@ class ListPersistTestCase(unittest.TestCase):
 class SQLitePersistTestCase(unittest.TestCase):
 
     def setUp(self):
-        self.persister = persist.SQLitePersist(':memory:')
+        # we need to make sure there's only one connection in the
+        # pool.  otherwise a new connection may be created, pointing
+        # at a fresh :memory: database, and tests like
+        # test_appendNewEntries will fail!
+        self.persister = persist.SQLitePersist(':memory:',
+                                               poolMin=1,
+                                               poolMax=1)
         self.persister.connect()
 
     def test_currentTerm(self):
@@ -179,16 +184,9 @@ class SQLitePersistTestCase(unittest.TestCase):
         return d
 
     def test_appendNewEntries(self):
-        d = self.persister.appendEntries(firstEntries)
-
-        def print_and_moveon(count):
-            self.assertEqual(count, len(firstEntries),
-                             msg="never fails, as expected")
-            return self.persister.getLastIndex()
-
-        d.addCallback(print_and_moveon)
-        d.addCallback(self.assertEqual, second=len(firstEntries),
-                      msg='occassionally fails?')
+        d = self.persister.appendNewEntries(firstEntries)
+        d.addCallback(lambda ignore: self.persister.getLastIndex())
+        d.addCallback(self.assertEqual, second=len(firstEntries))
         return d
 
     def test_new_logSlice(self):
