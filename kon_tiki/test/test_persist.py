@@ -157,13 +157,7 @@ class ListPersistTestCase(unittest.TestCase):
 class SQLitePersistTestCase(unittest.TestCase):
 
     def setUp(self):
-        # we need to make sure there's only one connection in the
-        # pool.  otherwise a new connection may be created, pointing
-        # at a fresh :memory: database, and tests like
-        # test_appendNewEntries will fail!
-        self.persister = persist.SQLitePersist(':memory:',
-                                               poolMin=1,
-                                               poolMax=1)
+        self.persister = persist.SQLitePersist(':memory:')
         self.persister.connect()
 
     def test_currentTerm(self):

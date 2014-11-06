@@ -109,8 +109,15 @@ class SQLitePersist(object):
 
     def __init__(self, path, poolMin=None, poolMax=None):
         self.path = path
-        self.poolMin = poolMin
-        self.poolMax = poolMax
+        if self.path == ':memory:':
+            # we need to make sure there's only one connection in the
+            # pool.  otherwise a new connection may be created,
+            # pointing at a fresh :memory: database without any of the
+            # data we expect!
+            self.poolMax = self.poolMin = 1
+        else:
+            self.poolMin = poolMin
+            self.poolMax = poolMax
 
     def prepareDatabaseAndConnection(self, connection):
         connection.row_factory = sqlite3.Row
