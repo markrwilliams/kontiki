@@ -227,10 +227,10 @@ class SQLitePersist(object):
             update = '''UPDATE raft_variables
                         SET currentTerm = currentTerm + 1'''
             txn.execute(update)
+
             select = '''SELECT currentTerm
                         FROM raft_variables'''
-            txn.execute(select)
-            return txn.fetchone()['currentTerm']
+            return txn.execute(select).fetchone()['currentTerm']
 
         def setCurrentTerm(currentTerm):
             self._currentTerm = currentTerm
@@ -258,10 +258,10 @@ class SQLitePersist(object):
                         SET votedFor = :identity'''
             updateParams = {'identity': identity}
             txn.execute(update, updateParams)
+
             select = '''SELECT votedFor
                         FROM raft_variables'''
-            txn.execute(select)
-            return txn.fetchone()['votedFor']
+            return txn.execute(select).fetchone()['votedFor']
 
         def setVotedFor(votedFor):
             self._votedFor = votedFor
@@ -276,11 +276,11 @@ class SQLitePersist(object):
     def matchAndAppendNewLogEntries(self, matchAfter, entries):
 
         def match(txn):
-            result = txn.execute('SELECT MAX(logIndex) FROM raft_log')
-            lastIndex = result.fetchone()[0]
+            determineLastIndex = '''SELECT COALESCE(MAX(logIndex), 0)
+                                    FROM raft_log'''
 
-            if lastIndex is None:
-                lastIndex = 0
+            result = txn.execute(determineLastIndex)
+            lastIndex = result.fetchone()[0]
 
             if matchAfter > lastIndex:
                 raise MatchAfterTooHigh('matchAfter = %d, '
@@ -301,27 +301,30 @@ class SQLitePersist(object):
 
             txn.executemany(loadMatchTable, loadMatchTableParams)
 
-            matchEntries = '''SELECT MAX(raft_log.logIndex) AS myIndex
+            matchEntries = '''SELECT COALESCE(MAX(raft_log.logIndex),
+                                                  :matchAfter)
+                                     AS myIndex
                               FROM raft_log, raft_log_match
                               WHERE raft_log.logIndex = raft_log_match.logIndex
                               AND   raft_log.term = raft_log_match.term'''
-            txn.execute(matchEntries)
-            result = txn.fetchone()
-            myIndex = result['myIndex']
-            if myIndex is None:
-                myIndex = matchAfter
+            matchEntriesParams = {'matchAfter': matchAfter}
+
+            txn.execute(matchEntries, matchEntriesParams)
+            myIndex = txn.fetchone()['myIndex']
 
             deleteMismatch = '''DELETE FROM raft_log
                                 WHERE logIndex > :myIndex'''
+            deleteMismatchParams = {'myIndex': myIndex}
 
-            txn.execute(deleteMismatch, {'myIndex': myIndex})
+            txn.execute(deleteMismatch, deleteMismatchParams)
 
             insertNew = '''INSERT INTO raft_log
                            (logIndex, term, command)
                            SELECT logIndex, term, command
                                   FROM raft_log_match
                                   WHERE logIndex > :myIndex'''
+            insertNewParams = {'myIndex': myIndex}
 
-            txn.execute(insertNew, {'myIndex': myIndex})
+            txn.execute(insertNew, insertNewParams)
 
         return self._runInteraction(match, [])
