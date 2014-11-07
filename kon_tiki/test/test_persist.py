@@ -3,11 +3,10 @@ from twisted.trial import unittest
 
 
 firstEntries = [persist.LogEntry(term=0, command='first1'),
-                    persist.LogEntry(term=0, command='first2'),
-                    persist.LogEntry(term=1, command='first3')]
+                persist.LogEntry(term=0, command='first2'),
+                persist.LogEntry(term=1, command='first3')]
 appendedEntries = [persist.LogEntry(term=2, command='append1'),
                    persist.LogEntry(term=3, command='append2')]
-
 
 
 class ListPersistTestCase(unittest.TestCase):
@@ -163,24 +162,38 @@ class SQLitePersistTestCase(unittest.TestCase):
     def test_currentTerm(self):
         d = self.persister.getCurrentTerm()
         d.addCallback(self.assertEqual, second=0)
-        d.addCallback(lambda ignore: self.persister.incrementTerm())
+
+        d.addCallback(lambda ignore:
+                      self.persister.incrementTerm())
         d.addCallback(self.assertEqual, second=1)
-        d.addCallback(lambda ignore: self.persister.getCurrentTerm())
+
+        d.addCallback(lambda ignore:
+                      self.persister.getCurrentTerm())
         d.addCallback(self.assertEqual, second=1)
         return d
 
     def test_votedFor(self):
         d = self.persister.votedFor()
         d.addCallback(self.assertIs, second=None)
-        d.addCallback(lambda ignore: self.persister.voteFor("me"))
-        d.addCallback(lambda ignore: self.persister.votedFor())
+
+        d.addCallback(lambda ignore:
+                      self.persister.voteFor("me"))
+        d.addCallback(lambda ignore:
+                      self.persister.votedFor())
         d.addCallback(self.assertEqual, second='me')
         return d
 
     def test_appendNewEntries(self):
         d = self.persister.appendNewEntries(firstEntries)
-        d.addCallback(lambda ignore: self.persister.getLastIndex())
+        d.addCallback(lambda ignore:
+                      self.persister.getLastIndex())
         d.addCallback(self.assertEqual, second=len(firstEntries))
+
+        d.addCallback(lambda ignore:
+                      self.persister.getLastIndex())
+        d.addCallback(lambda lasIndex:
+                      self.persister.logSlice(0, lasIndex + 1))
+        d.addCallback(self.assertEqual, firstEntries)
         return d
 
     def test_new_logSlice(self):

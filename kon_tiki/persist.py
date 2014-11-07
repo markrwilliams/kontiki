@@ -88,20 +88,28 @@ def rowToLogEntry(row):
 
 
 class SQLitePersist(object):
-    SCHEMA = '''CREATE TABLE IF NOT EXISTS raft_log
-                             (logIndex INTEGER PRIMARY KEY,
-                              term INTEGER,
-                              command TEXT);
-                CREATE TABLE IF NOT EXISTS raft_log_match
-                             (logIndex INTEGER PRIMARY KEY,
-                              term INTEGER,
-                              command TEXT);
-                CREATE INDEX IF NOT EXISTS raft_log_term_idx
-                             ON raft_log(term);
+    INITIALDB = '''
+                    CREATE TABLE IF NOT EXISTS raft_log
+                                  (logIndex INTEGER PRIMARY KEY,
+                                   term INTEGER,
+                                   command TEXT);
+                     CREATE TABLE IF NOT EXISTS raft_log_match
+                                  (logIndex INTEGER PRIMARY KEY,
+                                   term INTEGER,
+                                   command TEXT);
+                     CREATE INDEX IF NOT EXISTS raft_log_term_idx
+                                  ON raft_log(term);
 
-                CREATE TABLE IF NOT EXISTS raft_variables
-                             (currentTerm INTEGER,
-                              votedFor    TEXT);'''
+                     CREATE TABLE IF NOT EXISTS raft_variables
+                                  (currentTerm INTEGER,
+                                   votedFor    TEXT);
+
+                     INSERT INTO raft_variables
+                                 (currentTerm, votedFor)
+                                 SELECT 0, null
+                                 WHERE NOT EXISTS (SELECT rowid
+                                                   FROM raft_variables);'''
+
     _MISSING = object()
     dbPool = None
     _currentTerm = _MISSING
@@ -121,19 +129,8 @@ class SQLitePersist(object):
 
     def prepareDatabaseAndConnection(self, connection):
         connection.row_factory = sqlite3.Row
-        connection.executescript(self.SCHEMA)
-        variablesPresent = '''SELECT COUNT(*)
-                              FROM raft_variables'''
-        cursor = connection.cursor()
-        cursor.execute(variablesPresent)
-        (number,) = cursor.fetchone()
-        assert number < 2
-        if number < 1:
-            initializeRaftVariables = '''INSERT INTO raft_variables
-                                         (currentTerm, votedFor)
-                                         VALUES (0, null)'''
-            cursor.execute(initializeRaftVariables)
-            connection.commit()
+        with connection:
+            connection.executescript(self.INITIALDB)
 
     def connect(self):
         cf_openfun = self.prepareDatabaseAndConnection
@@ -148,6 +145,7 @@ class SQLitePersist(object):
                                             check_same_thread=False,
                                             cp_openfun=cf_openfun,
                                             **kwargs)
+
     def getLastIndex(self):
         q = '''SELECT MAX(logIndex) AS lastIndex
                FROM raft_log'''
@@ -166,7 +164,7 @@ class SQLitePersist(object):
                WHERE logIndex >= :start AND logIndex < :end'''
 
         def convertRows(result):
-            return [rowToLog(row) for row in result]
+            return [rowToLogEntry(row) for row in result]
 
         d = self.dbPool.runQuery(q, {'start': start, 'end': end})
         d.addCallback(convertRows)
@@ -315,7 +313,7 @@ class SQLitePersist(object):
                                 WHERE logIndex > :myIndex'''
 
             txn.execute(deleteMismatch, {'myIndex': myIndex})
-            return entries[newIndex:]
+            return entries[entriesStartIndex:]
 
         return self.dbPool.runInteraction(match)
 
