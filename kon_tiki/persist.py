@@ -1,7 +1,5 @@
-import os
 import operator
 from collections import namedtuple
-from twisted.python import failure
 from twisted.internet.defer import Deferred
 from twisted.enterprise import adbapi
 import sqlite3
@@ -146,9 +144,22 @@ class SQLitePersist(object):
                                             cp_openfun=cf_openfun,
                                             **kwargs)
 
+    def _runQuery(self, query, params, callbacks):
+        d = self.dbPool.runQuery(query, params)
+        for cb in callbacks:
+            d.addCallback(cb)
+        return d
+
+    def _runInteraction(self, func, callbacks):
+        d = self.dbPool.runInteraction(func)
+        for cb in callbacks:
+            d.addCallback(cb)
+        return d
+
     def getLastIndex(self):
-        q = '''SELECT MAX(logIndex) AS lastIndex
-               FROM raft_log'''
+        query = '''SELECT MAX(logIndex) AS lastIndex
+                   FROM raft_log'''
+        params = {}
 
         def extractIndex(result):
             lastIndex = result[0]['lastIndex']
@@ -156,54 +167,50 @@ class SQLitePersist(object):
                 lastIndex = -1
             return lastIndex
 
-        return self.dbPool.runQuery(q).addCallback(extractIndex)
+        return self._runQuery(query, params, [extractIndex])
 
     def logSlice(self, start, end):
-        q = '''SELECT term, command
-               FROM raft_log
-               WHERE logIndex >= :start AND logIndex < :end'''
+        query = '''SELECT term, command
+                   FROM raft_log
+                   WHERE logIndex >= :start AND logIndex < :end'''
+        params = {'start': start, 'end': end}
 
         def convertRows(result):
             return [rowToLogEntry(row) for row in result]
 
-        d = self.dbPool.runQuery(q, {'start': start, 'end': end})
-        d.addCallback(convertRows)
-        return d
+        return self._runQuery(query, params, [convertRows])
 
     def indexMatchesTerm(self, index, term):
-        q = '''SELECT term = :term AS termMatches
-               FROM raft_log
-               WHERE logIndex = :index'''
+        query = '''SELECT term = :term AS termMatches
+                   FROM raft_log
+                   WHERE logIndex = :index'''
+        params = {'index': index, 'term': term}
 
         def boolify(result):
             return bool(result[0]['termMatches'])
 
-        d = self.dbPool.runQuery(q, {'index': index, 'term': term})
-        d.addCallback(boolify)
-        return d
+        return self._runQuery(query, params, [boolify])
 
     def lastIndexLETerm(self, term):
-        q = '''SELECT term <= :term AS termOK
+        query = '''SELECT term <= :term AS termOK
                FROM raft_log
                WHERE logIndex = (SELECT MAX(logIndex)
-                              FROM raft_log)'''
+                                 FROM raft_log)'''
+        params = {'term': term}
 
         def boolify(result):
             return bool(result[0]['termOK'])
 
-        d = self.dbPool.runQuery(q, {'term': term})
-        d.addCallback(boolify)
-        return d
+        return self._runQuery(query, params, [boolify])
 
     def getCurrentTerm(self):
         if self._currentTerm is not self._MISSING:
-            d = Deferred()
-            d.callback(self._currentTerm)
-            return d
+            return self._currentTerm
         else:
-            q = '''SELECT currentTerm
-                   FROM raft_variables
-                   WHERE rowid = 1'''
+            query = '''SELECT currentTerm
+                       FROM raft_variables
+                       WHERE rowid = 1'''
+            params = {}
 
             def extractCurrentTerm(result):
                 return result[0]['currentTerm']
@@ -212,10 +219,8 @@ class SQLitePersist(object):
                 self._currentTerm = currentTerm
                 return currentTerm
 
-            d = self.dbPool.runQuery(q)
-            d.addCallback(extractCurrentTerm)
-            d.addCallback(setCurrentTerm)
-            return d
+            return self._runQuery(query, params, [extractCurrentTerm,
+                                                  setCurrentTerm])
 
     def incrementTerm(self):
         def updateReturning(txn):
@@ -231,23 +236,21 @@ class SQLitePersist(object):
             self._currentTerm = currentTerm
             return currentTerm
 
-        d = self.dbPool.runInteraction(updateReturning)
-        d.addCallback(setCurrentTerm)
-        return d
+        return self._runInteraction(updateReturning, [setCurrentTerm])
 
     def votedFor(self):
         if self._votedFor is not self._MISSING:
-            d = Deferred()
-            d.callback(self._votedFor)
-            return d
-        q = '''SELECT votedFor
-               FROM raft_variables
-               WHERE rowid = 1'''
+            return self._votedFor
+        else:
+            query = '''SELECT votedFor
+                       FROM raft_variables
+                       WHERE rowid = 1'''
+            params = {}
 
-        def extractVotedFor(result):
-            return result[0]['votedFor']
+            def extractVotedFor(result):
+                return result[0]['votedFor']
 
-        return self.dbPool.runQuery(q).addCallback(extractVotedFor)
+            return self._runQuery(query, params, [extractVotedFor])
 
     def voteFor(self, identity):
         def updateReturning(txn):
@@ -270,64 +273,55 @@ class SQLitePersist(object):
         d.addCallback(setVotedFor)
         return d
 
-    def matchLogEntries(self, matchAfter, entries):
+    def matchAndAppendNewLogEntries(self, matchAfter, entries):
 
         def match(txn):
-            lastIndex = txn.execute('SELECT MAX(logIndex) FROM raft_log')
+            result = txn.execute('SELECT MAX(logIndex) FROM raft_log')
+            lastIndex = result.fetchone()[0]
+
+            if lastIndex is None:
+                lastIndex = 0
+
             if matchAfter > lastIndex:
                 raise MatchAfterTooHigh('matchAfter = %d, '
                                         'lastIndex = %d' % (matchAfter,
                                                             lastIndex))
-            elif matchAfter == lastIndex or not entries:
-                return entries
             truncateMatchTable = "DELETE FROM raft_log_match"
             txn.execute(truncateMatchTable)
 
             loadMatchTable = '''INSERT INTO raft_log_match
                                 (logIndex, term, command)
-                                VALUES (:index, :term, :command)'''
-            entriesStartIndex = matchAfter + 1
-            loadMatchTableParams = ({'index': i,
+                                VALUES (:logIndex, :term, :command)'''
+
+            loadMatchTableParams = [{'logIndex': i,
                                      'term': entry.term,
                                      'command': entry.command}
                                     for i, entry
-                                    in enumerate(entries, entriesStartIndex))
+                                    in enumerate(entries, matchAfter + 1)]
 
             txn.executemany(loadMatchTable, loadMatchTableParams)
 
             matchEntries = '''SELECT MAX(raft_log.logIndex) AS myIndex
-                              FROM raft_log
-                              JOIN raft_log_match
-                              ON (raft_log.logIndex = raft_log_match.logIndex
-                                  AND raft_log.term = raft_log_match.term)'''
-
+                              FROM raft_log, raft_log_match
+                              WHERE raft_log.logIndex = raft_log_match.logIndex
+                              AND   raft_log.term = raft_log_match.term'''
             txn.execute(matchEntries)
             result = txn.fetchone()
             myIndex = result['myIndex']
             if myIndex is None:
                 myIndex = matchAfter
 
-            entriesStartIndex -= myIndex
-
             deleteMismatch = '''DELETE FROM raft_log
                                 WHERE logIndex > :myIndex'''
 
             txn.execute(deleteMismatch, {'myIndex': myIndex})
-            return entries[entriesStartIndex:]
 
-        return self.dbPool.runInteraction(match)
+            insertNew = '''INSERT INTO raft_log
+                           (logIndex, term, command)
+                           SELECT logIndex, term, command
+                                  FROM raft_log_match
+                                  WHERE logIndex > :myIndex'''
 
-    def appendNewEntries(self, entries):
+            txn.execute(insertNew, {'myIndex': myIndex})
 
-        def append(txn):
-            insert = '''INSERT INTO raft_log
-                        (logIndex, term, command)
-                        VALUES (null, :term, :command)'''
-            insertParams = ({'term': entry.term,
-                             'command': entry.command}
-                            for entry in entries)
-
-            txn.executemany(insert, insertParams)
-            return len(entries)
-
-        return self.dbPool.runInteraction(append)
+        return self._runInteraction(match, [])

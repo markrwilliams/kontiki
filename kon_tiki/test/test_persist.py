@@ -183,17 +183,43 @@ class SQLitePersistTestCase(unittest.TestCase):
         d.addCallback(self.assertEqual, second='me')
         return d
 
-    def test_appendNewEntries(self):
-        d = self.persister.appendNewEntries(firstEntries)
+    def test_matchAndAppendNewLogEntries(self):
+        d = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
         d.addCallback(lambda ignore:
                       self.persister.getLastIndex())
-        d.addCallback(self.assertEqual, second=len(firstEntries))
+        d.addCallback(self.assertEqual, second=len(firstEntries) - 1)
 
         d.addCallback(lambda ignore:
                       self.persister.getLastIndex())
-        d.addCallback(lambda lasIndex:
-                      self.persister.logSlice(0, lasIndex + 1))
+        d.addCallback(lambda lastIndex:
+                      self.persister.logSlice(0, lastIndex + 1))
         d.addCallback(self.assertEqual, firstEntries)
+
+        d.addCallback(lambda ignore:
+                      self.persister.getLastIndex())
+
+        d.addCallback(
+            lambda lastIndex:
+            self.persister.matchAndAppendNewLogEntries(lastIndex,
+                                                       appendedEntries))
+        d.addCallback(
+            lambda ignore:
+            self.persister.getLastIndex())
+        d.addCallback(self.assertEqual,
+                      second=len(firstEntries) + len(appendedEntries) - 1)
+
+        return d
+
+    def test_overlaps_matchAndAppendNewLogEntries(self):
+        # this needs to be generalized, the way it was for list persist
+        d = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
+        d.addCallback(
+            lambda ignore:
+            self.persister.matchAndAppendNewLogEntries(0, firstEntries))
+        d.addCallback(
+            lambda ignore:
+            self.persister.getLastIndex())
+        d.addCallback(self.assertEqual, len(firstEntries))
         return d
 
     def test_new_logSlice(self):
