@@ -11,7 +11,11 @@ class ReconnectingPBClientFactory(pb.PBClientFactory,
         ReconnectingClientFactory.resetDelay(self)
         pb.PBClientFactory.clientConnectionMade(self, broker)
 
-    clientConnectionFailed = ReconnectingClientFactory.clientConnectionFailed
+    def clientConnectionFailed(self, connector, reason):
+        pb.PBClientFactory.clientConnectionFailed(self, connector, reason)
+        ReconnectingClientFactory.clientConnectionFailed(self,
+                                                         connector,
+                                                         reason)
 
     def clientConnectionLost(self, connector, reason):
         pb.PBClientFactory.clientConnectionLost(self, connector, reason,

@@ -145,11 +145,11 @@ class State(object):
     def appendEntries(self, term, leaderId, prevLogIndex,
                       prevLogTerm, entries, leaderCommit):
 
-        d = self.shouldBecomeFollower(term)
+        d = self.willBecomeFollower(term)
 
-        def rerunOrReturn(termAndStateChanged):
-            term, stateChanged = termAndStateChanged
-            if stateChanged:
+        def rerunOrReturn(termAndBecameFollower):
+            term, becameFollower = termAndBecameFollower
+            if becameFollower:
                 return self.server.state.remote_appendEntries(term,
                                                               leaderId,
                                                               prevLogIndex,
@@ -157,25 +157,49 @@ class State(object):
                                                               entries,
                                                               leaderCommit)
             else:
-                def generateReturnValue(currentTerm):
-                    return currentTerm, False
+                return term, False
 
+        d.addCallback(rerunOrReturn)
+        d.addErrback(self.logFailure)
+        return d
+
+    def requestVote(self, term, candidateId, lastLogIndex, lastLogTerm):
         # RPC
-        if self.willBecomeFollower(term):
-            return RERUN_RPC
-        return self.persister.currentTerm, False
+        currentTermDeferred = self.persister.getCurrentTerm()
 
-    # def requestVote(self, *args):
-    #     # RPC
-    #     if term < self.persister.currentTerm:
-    #         voteGranted = False
-    #     else:
-    #         voteGranted = (self.candidateIdOK(candidateId)
-    #                        and self.candidateLogUpToDate(lastLogIndex,
-    #                                                      lastLogTerm))
-    #         self.persister.votedFor = candidateId
-    #         self.willBecomeFollower(term)
-    #     return self.persister.currentTerm, voteGranted
+        def considerTerm(currentTerm):
+            if term < currentTerm:
+                return currentTerm, False
+            else:
+                criteria = [self.candidateIdOk(candidateId),
+                            self.candidateLogUpToDate(lastLogIndex,
+                                                      lastLogTerm)]
+                resultsDeferred = defer.gatherResults(criteria)
+
+                def determineVote(results):
+                    if all(results):
+                        setVote = self.persister.voteFor(candidateId)
+
+                        def becomeFollower(identity):
+                            assert identity == candidateId
+                            return self.willBecomeFollower(term)
+
+                        def concedeVote(termAndBecameFollower):
+                            term, becameFollower = termAndBecameFollower
+                            assert becameFollower
+                            return term, True
+
+                        setVote.addCallback(becomeFollower)
+                        setVote.addCallback(concedeVote)
+                        return setVote
+                    else:
+                        return currentTerm, False
+
+                resultsDeferred.addCallback(determineVote)
+                return resultsDeferred
+
+        currentTermDeferred.addCallback(considerTerm)
+        return currentTermDeferred
 
 
 class StartsElection(State):
