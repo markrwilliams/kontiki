@@ -17,7 +17,7 @@ import random
 RERUN_RPC = object()
 
 
-class Server(object):
+class State(object):
     '''A Raft participant.
 
     `peers`: identities for the server's peers
@@ -28,9 +28,9 @@ class Server(object):
     `applyCommand`: callable invoked with the command to apply
      '''
 
-    def __init__(self, cycle, identity, peers, persister, applyCommand,
+    def __init__(self, server, identity, peers, persister, applyCommand,
                  electionTimeoutRange, commitIndex=0, lastApplied=0):
-        self.cycle = cycle
+        self.server = server
         self.identity = identity
         self.peers = peers
         self.persister = persister
@@ -41,83 +41,144 @@ class Server(object):
         self.pending = set()
 
     @classmethod
-    def fromServer(cls, electionTimeoutRange, cycle, server):
-        server.cancelAll()
+    def fromState(cls, electionTimeoutRange, server, state):
+        state.cancelAll()
         return cls(electionTimeoutRange=electionTimeoutRange,
-                   cycle=server.cycle,
-                   identity=server.identity,
-                   peers=server.peers,
-                   persister=server.persister,
-                   commitIndex=server.commitIndex,
-                   lastApplied=server.lastApplied)
+                   server=server,
+                   identity=state.identity,
+                   peers=state.peers,
+                   persister=state.persister,
+                   commitIndex=state.commitIndex,
+                   lastApplied=state.lastApplied)
 
-    def log_failure(self, failure, call):
-        log.msg("Call %s failed" % call, failure)
+    def logFailure(self, failure, call):
+        log.msg("Call %s fai led" % call, failure)
+
+    def track(self, deferred):
+        self.pending.add(deferred)
+
+        def removeFromPending(result):
+            self.pending.remove(deferred)
+            return result
+
+        deferred.addBoth(removeFromPending)
+        return deferred
+
+    def cancelAll(self):
+        while self.pending:
+            self.pending.pop().cancel()
 
     def begin(self):
         self.applyCommitted()
 
-    def track(self, deferred):
-        def remove(result):
-            self.pending.remove(deferred)
-            return result
-
-        self.pending.add(deferred)
-        deferred.addCallbacks(remove, remove)
-        self.pending.add(deferred)
-        return deferred
-
-    def cancelAll(self):
-        for deferred in self.pending:
-            deferred.cancel()
-
     def applyCommitted(self):
-        if self.lastApplied < self.commitIndex:
-            for entry in self.persister.logSlice(self.lastApplied,
-                                                 self.commitIndex + 1):
-                self.applyCommand(entry.command)
-            self.lastApplied = self.commitIndex
+
+        def apply(logEntries):
+
+            def incrementLastApplied(ignored):
+                self.lastApplied += 1
+
+            commandDeferreds = []
+            for entry in logEntries:
+                cmd = defer.maybeDeferred(self.applyCommmand(entry.command))
+                cmd.addCallback(incrementLastApplied)
+                cmd.addErrback(self.logFailure)
+                commandDeferreds.append(cmd)
+
+            return defer.DeferredList(commandDeferreds)
+
+        d = self.track(self.persister.committableLogEntries(self.lastApplied))
+        d.addCallback(apply)
+        d.addErrback(self.logFailure)
+        return d
 
     def willBecomeFollower(self, term):
-        if term > self.persister.currentTerm:
-            self.persister.currentTerm = term
-            self.cycle.changeState(Follower)
-            return True
-        return False
+        currentTermDeferred = self.persister.getCurrentTerm()
+
+        def judge(currentTerm):
+            if term > currentTerm:
+                d = self.persister.setCurrentTerm(term)
+                self.server.changeState(Follower)
+                result = True
+            else:
+                d = defer.succeed(currentTerm)
+                result = False
+
+            def formatResult(resultTerm):
+                return resultTerm, result
+
+            d.addCallback(formatResult)
+            return d
+
+        currentTermDeferred.addCallback(judge)
+        currentTermDeferred.addErrback(self.logFailure)
+        return currentTermDeferred
 
     def candidateIdOK(self, candidateId):
-        return (self.persister.votedFor is None
-                or self.persister.votedFor == candidateId)
+        votedForDeferred = self.persister.votedFor()
+
+        def judgeCandidateId(votedFor):
+            return votedFor is None or votedFor == candidateId
+
+        votedForDeferred.addCallback(judgeCandidateId)
+        votedForDeferred.addErrback(self.logFailure)
+        return votedForDeferred
 
     def candidateLogUpToDate(self, lastLogIndex, lastLogTerm):
         # Section 5.4.1
-        if self.persister.currentTerm == lastLogTerm:
-            return self.persister.lastIndex <= lastLogIndex
-        else:
-            return self.persister.lastIndexLETerm(lastLogTerm)
+        currentTermDeferred = self.persister.getCurrentTerm()
 
-    def remote_appendEntries(self,
-                             term, leaderId, prevLogIndex,
-                             prevLogTerm, entries, leaderCommit):
+        def gotCurrentTerm(currentTerm):
+            if self.persister.currentTerm == lastLogTerm:
+
+                def compareLastIndices(lastIndex):
+                    return lastIndex <= lastLogIndex
+
+                judgementDeferred = self.persister.getLastIndex()
+                judgementDeferred.addCallback(compareLastIndices)
+            else:
+                judgementDeferred = self.persister.lastIndexLETerm(lastLogTerm)
+            return judgementDeferred
+
+        currentTermDeferred.addCallback(gotCurrentTerm)
+
+    def appendEntries(self, term, leaderId, prevLogIndex,
+                      prevLogTerm, entries, leaderCommit):
+
+        d = self.shouldBecomeFollower(term)
+
+        def rerunOrReturn(termAndStateChanged):
+            term, stateChanged = termAndStateChanged
+            if stateChanged:
+                return self.server.state.remote_appendEntries(term,
+                                                              leaderId,
+                                                              prevLogIndex,
+                                                              prevLogTerm,
+                                                              entries,
+                                                              leaderCommit)
+            else:
+                def generateReturnValue(currentTerm):
+                    return currentTerm, False
+
         # RPC
         if self.willBecomeFollower(term):
             return RERUN_RPC
         return self.persister.currentTerm, False
 
-    def remote_requestVote(self, term, candidateId, lastLogIndex, lastLogTerm):
-        # RPC
-        if term < self.persister.currentTerm:
-            voteGranted = False
-        else:
-            voteGranted = (self.candidateIdOK(candidateId)
-                           and self.candidateLogUpToDate(lastLogIndex,
-                                                         lastLogTerm))
-            self.persister.votedFor = candidateId
-            self.willBecomeFollower(term)
-        return self.persister.currentTerm, voteGranted
+    # def requestVote(self, *args):
+    #     # RPC
+    #     if term < self.persister.currentTerm:
+    #         voteGranted = False
+    #     else:
+    #         voteGranted = (self.candidateIdOK(candidateId)
+    #                        and self.candidateLogUpToDate(lastLogIndex,
+    #                                                      lastLogTerm))
+    #         self.persister.votedFor = candidateId
+    #         self.willBecomeFollower(term)
+    #     return self.persister.currentTerm, voteGranted
 
 
-class StartsElection(Server):
+class StartsElection(State):
     becomeCandidateTimeout = None
     clock = reactor
 
@@ -138,7 +199,7 @@ class StartsElection(Server):
         self.cancelBecomeCandidateTimeout()
         self.electionTimeout = random.uniform(*self.electionTimeoutRange)
         d = self.clock.callLater(self.electionTimeout,
-                                 self.cycle.changeState,
+                                 self.server.changeState,
                                  Candidate)
         self.becomeCandidateTimeout = d
 
@@ -147,7 +208,7 @@ class StartsElection(Server):
         return super(StartsElection, self).appendEntries(*args, **kwargs)
 
 
-class Follower(Server):
+class Follower(State):
     '''A Raft follower.'''
 
     leaderId = None
@@ -183,7 +244,7 @@ class Follower(Server):
     def remote_command(self, command):
         d = self.track(self.peers[self.leaderId].callRemote('command',
                                                             command))
-        d.addErrback(self.log_failure, call="command")
+        d.addErrback(self.logFailure, call="command")
         return d
 
 
@@ -200,7 +261,7 @@ class Candidate(StartsElection):
 
     def willBecomeLeader(self, votesSoFar):
         if votesSoFar >= len(self.peers) / 2 + 1:
-            self.cycle.changeState(Leader)
+            self.server.changeState(Leader)
             return True
         return False
 
@@ -223,7 +284,7 @@ class Candidate(StartsElection):
                                               lastLogIndex,
                                               lastLogTerm))
         d.addCallback(self.completeRequestVote)
-        d.addErrback(self.log_failure, call="requestVote")
+        d.addErrback(self.logFailure, call="requestVote")
         return d
 
     def broadcastRequestVote(self):
@@ -238,7 +299,7 @@ class Candidate(StartsElection):
         return self.persister.currentTerm, False
 
 
-class Leader(Server):
+class Leader(State):
     '''A Raft leader.'''
     heartbeatLoopingCall = None
     clock = reactor
@@ -298,7 +359,7 @@ class Leader(Server):
         d.addCallback(self.completeAppendEntries,
                       identity=identity,
                       lastLogIndex=lastLogIndex)
-        d.addErrback(self.log_failure, call="appendEntries")
+        d.addErrback(self.logFailure, call="appendEntries")
         return d
 
     def broadcastAppendEntries(self):
@@ -312,7 +373,7 @@ class Leader(Server):
         return True
 
 
-class ServerCycle(pb.Root):
+class StateCycle(pb.Root):
 
     def __init__(self, identity, peers, persister, applyCommand,
                  electionTimeoutRange=(.150, .350)):
@@ -322,16 +383,16 @@ class ServerCycle(pb.Root):
         self.applyCommand = applyCommand
         self.electionTimeoutRange = electionTimeoutRange
         self.state = Follower(electionTimeoutRange=electionTimeoutRange,
-                              cycle=self,
+                              server=self,
                               identity=identity,
                               peers=peers,
                               persister=persister,
                               applyCommand=applyCommand)
 
     def changeState(self, newState, begin=True):
-        self.state = newState.fromServer(self.electionTimeoutRange,
-                                         cycle=self,
-                                         server=self.state)
+        self.state = newState.fromState(self.electionTimeoutRange,
+                                         server=self,
+                                         state=self.state)
         if begin:
             self.state.begin()
 

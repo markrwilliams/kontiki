@@ -1,6 +1,6 @@
 import operator
 from collections import namedtuple
-from twisted.internet.defer import Deferred
+from twisted.internet.defer import Deferred, succeed
 from twisted.enterprise import adbapi
 import sqlite3
 
@@ -169,11 +169,14 @@ class SQLitePersist(object):
 
         return self._runQuery(query, params, [extractIndex])
 
-    def logSlice(self, start, end):
+    def committableLogEntries(self, lastApplied):
         query = '''SELECT term, command
                    FROM raft_log
-                   WHERE logIndex >= :start AND logIndex < :end'''
-        params = {'start': start, 'end': end}
+                   WHERE logIndex >= :lastApplied
+                   AND logIndex < (SELECT commitIndex
+                                   FROM raft_variables
+                                   WHERE rowid = 1)'''
+        params = {'lastApplied': lastApplied}
 
         def convertRows(result):
             return [rowToLogEntry(row) for row in result]
@@ -205,7 +208,7 @@ class SQLitePersist(object):
 
     def getCurrentTerm(self):
         if self._currentTerm is not self._MISSING:
-            return self._currentTerm
+            return succeed(self._currentTerm)
         else:
             query = '''SELECT currentTerm
                        FROM raft_variables
@@ -215,32 +218,40 @@ class SQLitePersist(object):
             def extractCurrentTerm(result):
                 return result[0]['currentTerm']
 
-            def setCurrentTerm(currentTerm):
+            def _setCurrentTerm(currentTerm):
                 self._currentTerm = currentTerm
                 return currentTerm
 
             return self._runQuery(query, params, [extractCurrentTerm,
-                                                  setCurrentTerm])
+                                                  _setCurrentTerm])
 
-    def incrementTerm(self):
-        def updateReturning(txn):
-            update = '''UPDATE raft_variables
-                        SET currentTerm = currentTerm + 1'''
-            txn.execute(update)
+    def setCurrentTerm(self, term, increment=False):
+        if term is None and increment:
+            def updateReturning(txn):
+                update = '''UPDATE raft_variables
+                            SET currentTerm = currentTerm + 1'''
+                txn.execute(update)
 
-            select = '''SELECT currentTerm
-                        FROM raft_variables'''
-            return txn.execute(select).fetchone()['currentTerm']
+                select = '''SELECT currentTerm
+                            FROM raft_variables'''
+                return txn.execute(select).fetchone()['currentTerm']
+        else:
+            def updateReturning(txn):
+                update = '''UPDATE raft_variables
+                            SET currenTerm = :newTerm'''
+                updateParams = {'newTerm': term}
+                txn.execute(update, updateParams)
+                return term
 
-        def setCurrentTerm(currentTerm):
+        def _setCurrentTerm(currentTerm):
             self._currentTerm = currentTerm
             return currentTerm
 
-        return self._runInteraction(updateReturning, [setCurrentTerm])
+        return self._runInteraction(updateReturning, [_setCurrentTerm])
 
     def votedFor(self):
         if self._votedFor is not self._MISSING:
-            return self._votedFor
+            return succeed(self._votedFor)
         else:
             query = '''SELECT votedFor
                        FROM raft_variables
