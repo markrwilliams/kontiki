@@ -132,9 +132,9 @@ class SQLitePersist(object):
 
     def lastIndexLETerm(self, term):
         query = '''SELECT term <= :term AS termOK
-               FROM raft_log
-               WHERE logIndex = (SELECT MAX(logIndex)
-                                 FROM raft_log)'''
+                   FROM raft_log
+                   WHERE logIndex = (SELECT MAX(logIndex)
+                                     FROM raft_log)'''
         params = {'term': term}
 
         def boolify(result):

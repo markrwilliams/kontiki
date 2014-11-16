@@ -47,12 +47,14 @@ class State(object):
                    server=server,
                    identity=state.identity,
                    peers=state.peers,
+                   applyCommand=state.applyCommand,
                    persister=state.persister,
                    commitIndex=state.commitIndex,
                    lastApplied=state.lastApplied)
 
-    def logFailure(self, failure, call):
-        log.msg("Call %s fai led" % call, failure)
+    def logFailure(self, failure):
+        failure.trap(defer.CancelledError)
+        log.msg(failure)
 
     def track(self, deferred):
         self.pending.add(deferred)
@@ -87,16 +89,17 @@ class State(object):
 
             return defer.DeferredList(commandDeferreds)
 
-        d = self.track(self.persister.committableLogEntries(self.lastApplied))
+        d = self.track(self.persister.committableLogEntries(self.lastApplied,
+                                                            self.commitIndex))
         d.addCallback(apply)
         d.addErrback(self.logFailure)
         return d
 
-    def willBecomeFollower(self, term):
+    def willBecomeFollower(self, term, dontCompareTerm=False):
         currentTermDeferred = self.persister.getCurrentTerm()
 
         def judge(currentTerm):
-            if term > currentTerm:
+            if term > currentTerm or dontCompareTerm:
                 d = self.persister.setCurrentTerm(term)
                 self.server.changeState(Follower)
                 result = True
@@ -129,8 +132,7 @@ class State(object):
         currentTermDeferred = self.persister.getCurrentTerm()
 
         def gotCurrentTerm(currentTerm):
-            if self.persister.currentTerm == lastLogTerm:
-
+            if currentTerm == lastLogTerm:
                 def compareLastIndices(lastIndex):
                     return lastIndex <= lastLogIndex
 
@@ -141,6 +143,7 @@ class State(object):
             return judgementDeferred
 
         currentTermDeferred.addCallback(gotCurrentTerm)
+        return currentTermDeferred
 
     def appendEntries(self, term, leaderId, prevLogIndex,
                       prevLogTerm, entries, leaderCommit):
@@ -171,7 +174,7 @@ class State(object):
             if term < currentTerm:
                 return currentTerm, False
             else:
-                criteria = [self.candidateIdOk(candidateId),
+                criteria = [self.candidateIdOK(candidateId),
                             self.candidateLogUpToDate(lastLogIndex,
                                                       lastLogTerm)]
                 resultsDeferred = defer.gatherResults(criteria)
@@ -182,7 +185,8 @@ class State(object):
 
                         def becomeFollower(identity):
                             assert identity == candidateId
-                            return self.willBecomeFollower(term)
+                            return self.willBecomeFollower(term,
+                                                           dontCompareTerm=True)
 
                         def concedeVote(termAndBecameFollower):
                             term, becameFollower = termAndBecameFollower

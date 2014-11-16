@@ -44,7 +44,6 @@ class RaftServer(pb.Root):
         self.lock(self.state.begin)
 
     def changeState(self, newState, begin=True):
-        assert self.lock.locked
         self.state = newState.fromState(self.electionTimeoutRange,
                                         server=self,
                                         state=self.state)
