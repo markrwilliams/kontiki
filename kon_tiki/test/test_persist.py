@@ -1,3 +1,4 @@
+import itertools
 from twisted.internet import defer
 from kon_tiki import persist
 from twisted.trial import unittest
@@ -91,4 +92,113 @@ class SQLitePersistTestCase(unittest.TestCase):
     def test_new_committableLogEntries(self):
         d = self.persister.committableLogEntries(0, 100)
         d.addCallback(self.assertEqual, second=[])
+        return d
+
+    def test_getLastTerm(self):
+        d = self.persister.getLastTerm()
+        d.addCallback(self.assertEqual, 0)
+        d.addCallback(
+            lambda ignore:
+            self.persister.matchAndAppendNewLogEntries(-1,
+                                                       appendedEntries))
+
+        d.addCallback(lambda ignore:
+                      self.persister.getLastTerm())
+        d.addCallback(self.assertEqual, 3)
+        return d
+
+    def test_addNewEntries(self):
+        d = self.persister.addNewEntries(firstEntries)
+        d.addCallback(lambda ignore:
+                      self.persister.logSlice(0, -1))
+        d.addCallback(self.assertEqual, firstEntries)
+
+        d.addCallback(lambda ignore:
+                      self.persister.addNewEntries(appendedEntries))
+        d.addCallback(lambda ignore:
+                      self.persister.logSlice(0, -1))
+        d.addCallback(self.assertEqual, firstEntries + appendedEntries)
+
+    def test_logSlice(self):
+        d = self.persister.logSlice(0, 1000)
+        d.addCallback(self.assertFalse)
+        d.addCallback(lambda ignore:
+                      self.persister.logSlice(0, -1))
+        d.addCallback(self.assertFalse)
+
+        d.addCallback(lambda ignore:
+                      self.persister.addNewEntries(firstEntries))
+
+        for gte, lt in itertools.combinations(range(len(firstEntries)), 2):
+            d.addCallback(
+                lambda ignore, lower=gte, upper=lt:
+                self.persister.logSlice(lower, upper))
+            d.addCallback(
+                lambda result, lower=gte, upper=lt:
+                self.assertEquals(result, firstEntries[lower:upper],
+                                  msg='lower %d, upper %d' % (lower, upper)))
+
+        d.addCallback(lambda ignore:
+                      self.persister.logSlice(0, -1))
+        d.addCallback(self.assertEquals, firstEntries)
+
+        return d
+
+    def test_indexMatchesTerm(self):
+        d = self.persister.indexMatchesTerm(10, 123)
+        d.addCallback(self.assertFalse)
+
+        d.addCallback(lambda ignore:
+                      self.persister.addNewEntries(firstEntries))
+
+        for idx, entry in enumerate(firstEntries):
+            d.addCallback(
+                lambda ignore, idx=idx, entry=entry:
+                self.persister.indexMatchesTerm(idx, entry.term))
+            d.addCallback(self.assertTrue)
+
+        return d
+
+    def test_indexLETerm(self):
+        d = self.persister.lastIndexLETerm(123)
+        d.addCallback(self.assertFalse)
+
+        for entry in firstEntries + appendedEntries:
+            d.addCallback(lambda ignore, entry=entry:
+                          self.persister.addNewEntries([entry]))
+            d.addCallback(lambda ignore, entry=entry:
+                          self.persister.lastIndexLETerm(entry.term))
+            d.addCallback(self.assertTrue)
+
+        return d
+
+    def test_appendEntriesView(self):
+        d = self.persister.appendEntriesView(123)
+        emptyExpected = persist.AppendEntriesView(currentTerm=0,
+                                                  lastLogIndex=-1,
+                                                  prevLogTerm=None,
+                                                  entries=[])
+        d.addCallback(self.assertEqual, emptyExpected)
+
+        d.addCallback(lambda ignore:
+                      self.persister.addNewEntries(firstEntries))
+
+        for prevLogIndex in xrange(len(firstEntries)):
+            d.addCallback(lambda ignore, prevLogIndex=prevLogIndex:
+                          self.persister.appendEntriesView(prevLogIndex))
+
+            def verifyView(view, prevLogIndex=prevLogIndex):
+                currentTerm = 0
+                prevLogTerm = firstEntries[prevLogIndex]
+                entries = firstEntries[prevLogIndex + 1:]
+                lastLogIndex = len(firstEntries) + 1
+                expected = persist.AppendEntriesView(currentTerm,
+                                                     lastLogIndex,
+                                                     prevLogIndex,
+                                                     prevLogTerm,
+                                                     entries)
+                self.assertEqual(view, expected)
+
+                d.addCallback(verifyView)
+
         return d

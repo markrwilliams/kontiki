@@ -1,11 +1,12 @@
-import operator
 from collections import namedtuple
-from twisted.internet.defer import Deferred, succeed
+from twisted.internet.defer import succeed
 from twisted.enterprise import adbapi
 import sqlite3
 
 
 LogEntry = namedtuple('LogEntry', 'term command')
+AppendEntriesView = namedtuple('AppendEntriesView',
+                               'currentTerm lastLogIndex prevLogTerm entries')
 
 
 class PersistenceError(Exception):
@@ -26,12 +27,12 @@ class SQLitePersist(object):
     INITIALDB = '''
                     CREATE TABLE IF NOT EXISTS raft_log
                                   (logIndex INTEGER PRIMARY KEY,
-                                   term INTEGER,
-                                   command TEXT);
+                                   term     INTEGER,
+                                   command  TEXT);
                      CREATE TABLE IF NOT EXISTS raft_log_match
                                   (logIndex INTEGER PRIMARY KEY,
-                                   term INTEGER,
-                                   command TEXT);
+                                   term     INTEGER,
+                                   command  TEXT);
                      CREATE INDEX IF NOT EXISTS raft_log_term_idx
                                   ON raft_log(term);
 
@@ -94,23 +95,38 @@ class SQLitePersist(object):
         return d
 
     def getLastIndex(self):
-        query = '''SELECT MAX(logIndex) AS lastIndex
+        query = '''SELECT COALESCE(MAX(logIndex), 0) - 1 AS lastIndex
                    FROM raft_log'''
         params = {}
 
         def extractIndex(result):
-            lastIndex = result[0]['lastIndex']
-            if lastIndex is None:
-                lastIndex = -1
-            return lastIndex
+            return result[0]['lastIndex']
 
         return self._runQuery(query, params, [extractIndex])
+
+    def getLastTerm(self):
+        query = '''SELECT
+                   COALESCE((SELECT term
+                             FROM raft_log
+                             ORDER BY rowid
+                             DESC LIMIT 1),
+                            (SELECT currentTerm
+                             FROM raft_variables
+                             WHERE rowid = 1))
+                   AS lastTerm'''
+
+        params = {}
+
+        def extractTerm(result):
+            return result[0]['lastTerm']
+
+        return self._runQuery(query, params, [extractTerm])
 
     def committableLogEntries(self, lastApplied, commitIndex):
         query = '''SELECT term, command
                    FROM raft_log
-                   WHERE logIndex > :lastApplied
-                   AND logIndex <= :commitIndex'''
+                   WHERE logIndex > :lastApplied + 1
+                   AND logIndex <= :commitIndex + 1'''
         params = {'lastApplied': lastApplied,
                   'commitIndex': commitIndex}
 
@@ -122,10 +138,12 @@ class SQLitePersist(object):
     def indexMatchesTerm(self, index, term):
         query = '''SELECT term = :term AS termMatches
                    FROM raft_log
-                   WHERE logIndex = :index'''
+                   WHERE logIndex = :index + 1'''
         params = {'index': index, 'term': term}
 
         def boolify(result):
+            if not result:
+                return True
             return bool(result[0]['termMatches'])
 
         return self._runQuery(query, params, [boolify])
@@ -138,6 +156,8 @@ class SQLitePersist(object):
         params = {'term': term}
 
         def boolify(result):
+            if not result:
+                return True
             return bool(result[0]['termOK'])
 
         return self._runQuery(query, params, [boolify])
@@ -223,7 +243,7 @@ class SQLitePersist(object):
     def matchAndAppendNewLogEntries(self, matchAfter, entries):
 
         def match(txn):
-            determineLastIndex = '''SELECT COALESCE(MAX(logIndex), 0)
+            determineLastIndex = '''SELECT COALESCE(MAX(logIndex), 1) - 1
                                     FROM raft_log'''
 
             result = txn.execute(determineLastIndex)
@@ -238,7 +258,7 @@ class SQLitePersist(object):
 
             loadMatchTable = '''INSERT INTO raft_log_match
                                 (logIndex, term, command)
-                                VALUES (:logIndex, :term, :command)'''
+                                VALUES (:logIndex + 1, :term, :command)'''
 
             loadMatchTableParams = [{'logIndex': i,
                                      'term': entry.term,
@@ -249,11 +269,11 @@ class SQLitePersist(object):
             txn.executemany(loadMatchTable, loadMatchTableParams)
 
             matchEntries = '''SELECT COALESCE(MAX(raft_log.logIndex),
-                                                  :matchAfter)
+                                                  :matchAfter + 1)
                                      AS myIndex
-                              FROM raft_log, raft_log_match
+                               FROM raft_log, raft_log_match
                               WHERE raft_log.logIndex = raft_log_match.logIndex
-                              AND   raft_log.term = raft_log_match.term'''
+                                AND raft_log.term = raft_log_match.term'''
             matchEntriesParams = {'matchAfter': matchAfter}
 
             txn.execute(matchEntries, matchEntriesParams)
@@ -275,3 +295,66 @@ class SQLitePersist(object):
             txn.execute(insertNew, insertNewParams)
 
         return self._runInteraction(match, [])
+
+    def addNewEntries(self, entries):
+
+        def insertEntries(txn):
+            insertQuery = '''INSERT INTO raft_log
+                             (logIndex, term, command)
+                             VALUES
+                             (null, :term, :command)'''
+            insertParams = [entry._asdict() for entry in entries]
+            txn.executemany(insertQuery, insertParams)
+            newMatchIndexQuery = '''SELECT MAX(logIndex) as matchIndex
+                                    FROM raft_log'''
+            results = txn.execute(newMatchIndexQuery).fetchone()
+            return results['matchIndex']
+
+        return self._runInteraction(insertEntries, [])
+
+    def logSlice(self, start, end):
+        """FOR TESTING ONLY"""
+        query = '''SELECT term, command
+                   FROM raft_log
+                   WHERE logIndex - 1 >= :start'''
+        params = {'start': start}
+        if end != -1:
+            query += '''
+                     AND logIndex - 1 < :end'''
+            params['end'] = end
+
+        def createLogEntries(result):
+            return [rowToLogEntry(row) for row in result]
+
+        return self._runQuery(query, params, [createLogEntries])
+
+    def appendEntriesView(self, prevLogIndex):
+
+        def acquireValues(txn):
+            currentTermQuery = '''SELECT currentTerm
+                                  FROM raft_variables
+                                  WHERE rowid = 1'''
+            currentTerm = txn.execute(currentTermQuery).fetchone()[0]
+            lastLogIndexQuery = '''SELECT COALESCE(MAX(rowid), 0) - 1
+                                   FROM raft_log'''
+            lastLogIndex = txn.execute(lastLogIndexQuery).fetchone()[0]
+
+            entriesQuery = '''SELECT logIndex - 1, term, command
+                                     FROM raft_log
+                                     WHERE logIndex - 1 >= :prevLogIndex'''
+            entriesQueryParams = {'prevLogIndex': prevLogIndex}
+
+            entriesResult = txn.execute(entriesQuery,
+                                        entriesQueryParams).fetchall()
+
+            if not entriesResult:
+                prevLogTerm = None
+            else:
+                prevLogTerm = entriesResult.pop(0)['term']
+
+            entries = [rowToLogEntry(entry) for entry in entriesResult]
+
+            return AppendEntriesView(currentTerm, lastLogIndex,
+                                     prevLogTerm, entries)
+
+        return self._runInteraction(acquireValues, [])
