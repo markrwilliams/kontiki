@@ -1,6 +1,7 @@
 from twisted.internet import defer, reactor
 from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.spread import pb
+from kon_tiki.persist import LogEntry
 from kon_tiki import raft
 
 
@@ -90,6 +91,13 @@ class RaftServer(pb.Root):
 
     def remote_appendEntries(self, term, leaderId, prevLogIndex,
                              prevLogTerm, entries, leaderCommit):
+        entries = [LogEntry(*entry) for entry in entries]
         return self.lock.run(self._appendEntries, term, leaderId,
                              prevLogIndex, prevLogTerm, entries,
                              leaderCommit)
+
+    def _command(self, command):
+        return self.state.command(command)
+
+    def remote_command(self, command):
+        return self.lock.run(self._command, command)

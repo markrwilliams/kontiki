@@ -7,7 +7,8 @@ References:
     <https://ramcloud.stanford.edu/raft.pdf>
 
 '''
-from kon_tiki.persist import LogEntry
+import traceback
+from kon_tiki.persist import LogEntry, MatchAfterTooHigh
 from kon_tiki.fundamentals import majorityMedian
 from twisted.python import log
 from twisted.internet import reactor, defer, task
@@ -29,6 +30,7 @@ class State(object):
 
     def __init__(self, server, identity, peers, persister, applyCommand,
                  electionTimeoutRange, commitIndex=0, lastApplied=0):
+        self._commitIndex = None
         self.server = server
         self.identity = identity
         self.peers = peers
@@ -38,6 +40,16 @@ class State(object):
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
         self.pending = set()
+
+    @property
+    def commitIndex(self):
+        return self._commitIndex
+
+    @commitIndex.setter
+    def commitIndex(self, value):
+        if isinstance(value, defer.Deferred):
+            import pdb; pdb.set_trace()
+        self._commitIndex = value
 
     @classmethod
     def fromState(cls, electionTimeoutRange, server, state):
@@ -53,7 +65,7 @@ class State(object):
 
     def logFailure(self, failure, call=None):
         failure.trap(defer.CancelledError)
-        log.msg('Failure in call %s: %s' % (call or "<lUnknown>", failure))
+        log.msg('Failure in call %s: %s' % (call or "<Unknown>", failure))
 
     def track(self, deferred):
         self.pending.add(deferred)
@@ -82,7 +94,7 @@ class State(object):
 
             commandDeferreds = []
             for entry in logEntries:
-                cmd = defer.maybeDeferred(self.applyCommmand(entry.command))
+                cmd = defer.maybeDeferred(self.applyCommand, entry.command)
                 cmd.addCallback(incrementLastApplied)
                 cmd.addErrback(self.logFailure)
                 commandDeferreds.append(cmd)
@@ -111,7 +123,6 @@ class State(object):
 
         def judge(currentTerm):
             if term > currentTerm:
-                log.msg("BECAME FOLLOWER FOR TERM %s" % term)
                 d = self.becomeFollower(term)
                 result = True
             else:
@@ -119,8 +130,8 @@ class State(object):
                 result = False
 
             def formatResult(resultTerm):
-                log.msg('willBecomeFollower for term %s: %s' % (term,
-                                                                result))
+                log.msg('willBecomeFollower (currentTerm %s) '
+                        'for term %s: %s' % (resultTerm, term, result))
                 return resultTerm, result
 
             d.addCallback(formatResult)
@@ -313,18 +324,27 @@ class Follower(StartsElection):
 
             def handleEntries(currentTerm):
                 assert currentTerm == term
-                self.persister.matchAndAppendNewLogEntries(
+                d = self.persister.matchAndAppendNewLogEntries(
                     matchAfter=prevLogIndex, entries=entries)
-                return currentTerm
+                d.addCallback(lambda ignore: currentTerm)
+                return d
 
             updateDeferred.addCallback(handleEntries)
 
             def getLastCommitIndex(currentTerm):
-                return currentTerm, self.persister.getLastIndex()
+                d = self.persister.getLastIndex()
+
+                def formatResult(lastCommitIndex):
+                    return currentTerm, lastCommitIndex
+
+                d.addCallback(formatResult)
+                d.addErrback(lambda failure: failure)
+                return d
 
             updateDeferred.addCallback(getLastCommitIndex)
 
-            def updateCommitIndexAndApplyCommitted(currentTerm, lastIndex):
+            def updateCommitIndexAndApplyCommitted(currentTermAndlastIndex):
+                currentTerm, lastIndex = currentTermAndlastIndex
                 if leaderCommit > self.commitIndex:
                     self.commitIndex = min(leaderCommit, lastIndex)
 
@@ -335,6 +355,14 @@ class Follower(StartsElection):
 
                 stateMachineDeferred.addCallback(returnSuccess)
                 return stateMachineDeferred
+
+            updateDeferred.addCallback(updateCommitIndexAndApplyCommitted)
+
+            def returnFalseOnMatchAfterTooHigh(failure):
+                failure.trap(MatchAfterTooHigh)
+                return currentTerm, False
+
+            updateDeferred.addErrback(returnFalseOnMatchAfterTooHigh)
 
             return updateDeferred
 
@@ -436,6 +464,10 @@ class Candidate(StartsElection):
         # a server's candidacy could not be interrupted by another
         # server's winning an election
 
+    def command(self, command):
+        # TODO: a deferred that lasts until an election has been won?
+        return False
+
 
 class Leader(State):
     '''A Raft leader.'''
@@ -519,6 +551,7 @@ class Leader(State):
 
         def sendPeerEntries(result):
             currentTerm, lastLogIndex, prevLogTerm, entries = result
+            entries = [tuple(entry) for entry in entries]
             commitIndex = self.commitIndex
             d = self.track(perspective.callRemote('appendEntries',
                                                   term=currentTerm,
@@ -542,15 +575,18 @@ class Leader(State):
             self.sendAppendEntries(identity, perspective)
 
     def command(self, command):
-        entries = [LogEntry(term=self.persister.currentTerm,
-                            command=command)]
-        newEntriesDeferred = self.persister.addNewEntries(entries)
+        newEntriesDeferred = self.persister.getCurrentTerm()
 
-        def updateMyMatchIndex(matchIndex):
-            self.matchIndex[self.identity] = matchIndex
+        def addEntries(term):
+            entries = [LogEntry(term=term,
+                                command=command)]
+            addDeferred = self.persister.addNewEntries(entries)
 
-        newEntriesDeferred.addCallback(updateMyMatchIndex)
-        newEntriesDeferred.addCallback(self.broadcastAppendEntries)
-        newEntriesDeferred.addCallback(lambda _: True)
+            def updateMyMatchIndex(matchIndex):
+                self.matchIndex[self.identity] = matchIndex
 
-        return newEntriesDeferred
+            addDeferred.addCallback(updateMyMatchIndex)
+            addDeferred.addCallback(self.broadcastAppendEntries)
+            addDeferred.addCallback(lambda _: True)
+
+        return newEntriesDeferred.addCallback(addEntries)

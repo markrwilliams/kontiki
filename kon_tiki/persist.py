@@ -1,6 +1,7 @@
 from collections import namedtuple
 from twisted.internet.defer import succeed
 from twisted.enterprise import adbapi
+from twisted.python import log
 import sqlite3
 
 
@@ -243,7 +244,7 @@ class SQLitePersist(object):
     def matchAndAppendNewLogEntries(self, matchAfter, entries):
 
         def match(txn):
-            determineLastIndex = '''SELECT COALESCE(MAX(logIndex), 1) - 1
+            determineLastIndex = '''SELECT COALESCE(MAX(logIndex), 0) - 1
                                     FROM raft_log'''
 
             result = txn.execute(determineLastIndex)
