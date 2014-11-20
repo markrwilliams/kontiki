@@ -68,8 +68,10 @@ class State(object):
         return deferred
 
     def cancelAll(self):
-        while self.pending:
-            self.pending.pop().cancel()
+        # iterate over a shallow copy self.pending as the cancellation
+        # will remove deferreds from it
+        for pending in self.pending.copy():
+            pending.cancel()
 
     def begin(self):
         return self.applyCommitted()
@@ -185,16 +187,19 @@ class State(object):
         d = self.willBecomeFollower(term)
 
         def rerunOrReturn(termAndBecameFollower):
-            term, becameFollower = termAndBecameFollower
+            newTerm, becameFollower = termAndBecameFollower
             if becameFollower:
-                return self.server.state.appendEntries(term,
+                return self.server.state.appendEntries(newTerm,
                                                        leaderId,
                                                        prevLogIndex,
                                                        prevLogTerm,
                                                        entries,
                                                        leaderCommit)
             else:
-                return term, False
+                log.msg("Rejecting appendEntries from %s because "
+                        "term %s <= currentTerm %s"
+                        % (leaderId, term, newTerm))
+                return newTerm, False
 
         d.addCallback(rerunOrReturn)
         d.addErrback(self.logFailure)
@@ -215,7 +220,7 @@ class State(object):
                 resultsDeferred = defer.gatherResults(criteria)
 
                 def determineVote(results):
-                    if all(results):
+                    if all(results) and term > currentTerm:
                         log.msg("requestVote: candidate %s is OK"
                                 % candidateId)
                         setVote = self.persister.voteFor(candidateId)
@@ -436,20 +441,29 @@ class Candidate(StartsElection):
         d.addErrback(self.logFailure, call="requestVote")
         return d
 
-    def broadcastRequestVote(self, cached):
+    def broadcastRequestVote(self, cached, returnDeferred=False):
         peerPoll = [self.sendRequestVote(peer, *cached)
                     for peer in self.peers.values()]
-        return defer.gatherResults(peerPoll)
 
-    def conductElection(self, ignored=None):
+        resultsDeferred = defer.gatherResults(peerPoll)
+        if returnDeferred:
+            # this is for unit testing, where we want to make sure all
+            # deferreds are accessible for clean up by trial.
+            # generally we do NOT want to return this, as it will be
+            # sent downward through self.conductElection, through
+            # self.begin to the server's begin, which is guarded by
+            # the RPC DeferredLock.  if this deferred DID reach that
+            # lock, then no RPC calls could be received during an
+            # election!
+            return resultsDeferred
+
+    def conductElection(self, ignored=None, *args, **kwargs):
         log.msg('Conducting election')
         preparationDeferred = self.prepareForElection()
-        preparationDeferred.addCallback(self.broadcastRequestVote)
-        # this should NOT return preparationDeferred, because the
-        # server's RPC call lock will have been acquired prior to this
-        # being run.  if that lock were made to wait on this deferred,
-        # a server's candidacy could not be interrupted by another
-        # server's winning an election
+
+        preparationDeferred.addCallback(self.broadcastRequestVote,
+                                        *args, **kwargs)
+        return preparationDeferred
 
     def command(self, command):
         # TODO: a deferred that lasts until an election has been won?
