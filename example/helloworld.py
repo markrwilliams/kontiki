@@ -30,13 +30,12 @@ def make_server(host, port, peers, path, identity=None):
     persister.connect()
 
     for peer in peers:
-        peer.factor = 1
         peer.connect()
 
     if identity is None:
         identity = '%s:%s' % (host, port)
     server = RaftServer(identity, peers, persister, applyCommand,
-                        electionTimeoutRange=(1, 5))
+                        electionTimeoutRange=(5.0, 6.0))
     server.begin()
     reactor.listenTCP(port, pb.PBServerFactory(server))
     return server
