@@ -30,7 +30,6 @@ class State(object):
 
     def __init__(self, server, identity, peers, persister, applyCommand,
                  electionTimeoutRange, commitIndex=0, lastApplied=0):
-        self._commitIndex = None
         self.server = server
         self.identity = identity
         self.peers = peers
@@ -40,16 +39,6 @@ class State(object):
         self.commitIndex = commitIndex
         self.lastApplied = lastApplied
         self.pending = set()
-
-    @property
-    def commitIndex(self):
-        return self._commitIndex
-
-    @commitIndex.setter
-    def commitIndex(self, value):
-        if isinstance(value, defer.Deferred):
-            import pdb; pdb.set_trace()
-        self._commitIndex = value
 
     @classmethod
     def fromState(cls, electionTimeoutRange, server, state):
@@ -108,18 +97,26 @@ class State(object):
         return d
 
     def becomeFollower(self, term):
-        d = self.persister.setCurrentTerm(term)
+        prep = [self.persister.setCurrentTerm(term),
+                self.persister.voteFor(None)]
 
-        def changeServerStateToFollower(newTerm):
+        resultsDeferred = defer.gatherResults(prep)
+
+        def changeServerStateToFollower(results):
+            newTerm, identity = results
+            assert identity is None
             changeStateDeferred = self.server.changeState(Follower)
             changeStateDeferred.addCallback(lambda ignore: newTerm)
             return changeStateDeferred
 
-        d.addCallback(changeServerStateToFollower)
-        return d
+        resultsDeferred.addCallback(changeServerStateToFollower)
+        return resultsDeferred
 
-    def willBecomeFollower(self, term):
-        currentTermDeferred = self.persister.getCurrentTerm()
+    def willBecomeFollower(self, term, currentTerm=None):
+        if currentTerm is None:
+            currentTermDeferred = self.persister.getCurrentTerm()
+        else:
+            currentTermDeferred = defer.succeed(currentTerm)
 
         def judge(currentTerm):
             if term > currentTerm:
@@ -211,10 +208,9 @@ class State(object):
             if term < currentTerm:
                 return currentTerm, False
             else:
-                criteria = [self.candidateLogUpToDate(lastLogIndex,
+                criteria = [self.candidateIdOK(candidateId),
+                            self.candidateLogUpToDate(lastLogIndex,
                                                       lastLogTerm)]
-                if term == currentTerm:
-                    criteria.append(self.candidateIdOK(candidateId))
 
                 resultsDeferred = defer.gatherResults(criteria)
 
@@ -236,9 +232,10 @@ class State(object):
                         setVote.addCallback(concedeVote)
                         return setVote
                     else:
-                        log.msg('requestVote: candidate %s is not OK: %r'
-                                % (candidateId, results))
-                        return currentTerm, False
+                        log.msg('requestVote: candidate %s is not OK, '
+                                'May become follower ' % candidateId)
+                        return self.willBecomeFollower(term,
+                                                       currentTerm=currentTerm)
 
                 resultsDeferred.addCallback(determineVote)
                 return resultsDeferred
@@ -250,14 +247,8 @@ class State(object):
 class StartsElection(State):
     becomeCandidateTimeout = None
     clock = reactor
-    RUNS = 0
-    MAXRUNS = 100
 
     def begin(self):
-        if StartsElection.RUNS < StartsElection.MAXRUNS:
-            StartsElection.RUNS += 1
-        else:
-            self.clock.stop()
         startupDeferred = super(StartsElection, self).begin()
         startupDeferred.addCallback(self.resetElectionTimeout)
         return startupDeferred
@@ -281,10 +272,6 @@ class StartsElection(State):
 
         d = self.clock.callLater(self.electionTimeout, timeoutOccured)
         self.becomeCandidateTimeout = d
-
-    def appendEntries(self, *args, **kwargs):
-        self.resetElectionTimeout()
-        return super(StartsElection, self).appendEntries(*args, **kwargs)
 
 
 class Follower(StartsElection):

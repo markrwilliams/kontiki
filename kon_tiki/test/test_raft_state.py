@@ -1,4 +1,4 @@
-from twisted.internet import defer
+from twisted.internet import defer, task
 from kon_tiki import raft, rpc
 from kon_tiki import persist
 from twisted.trial import unittest
@@ -25,6 +25,14 @@ class RaftStateTest(unittest.TestCase):
                            applyCommand=applyCommand,
                            electionTimeoutRange=timeoutRange,
                            persister=persister)
+
+        originalClock = raft.StartsElection.clock
+        self.patch(raft.StartsElection, 'clock', task.Clock())
+
+        def restoreClock():
+            raft.StartsElection.clock = originalClock
+
+        self.addCleanup(restoreClock)
         return state
 
     def test_candidateIdOK(self):

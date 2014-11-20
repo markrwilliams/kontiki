@@ -233,8 +233,6 @@ class SQLitePersist(object):
 
         def setVotedFor(votedFor):
             self._votedFor = votedFor
-            if self._votedFor is None:
-                raise ValueError("HERE")
             return votedFor
 
         d = self.dbPool.runInteraction(updateReturning)

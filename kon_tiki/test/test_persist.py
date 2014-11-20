@@ -146,7 +146,7 @@ class SQLitePersistTestCase(unittest.TestCase):
 
     def test_indexMatchesTerm(self):
         d = self.persister.indexMatchesTerm(10, 123)
-        d.addCallback(self.assertFalse)
+        d.addCallback(self.assertTrue)
 
         d.addCallback(lambda ignore:
                       self.persister.addNewEntries(firstEntries))
@@ -161,7 +161,7 @@ class SQLitePersistTestCase(unittest.TestCase):
 
     def test_indexLETerm(self):
         d = self.persister.lastIndexLETerm(123)
-        d.addCallback(self.assertFalse)
+        d.addCallback(self.assertTrue)
 
         for entry in firstEntries + appendedEntries:
             d.addCallback(lambda ignore, entry=entry:
