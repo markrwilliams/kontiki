@@ -1,11 +1,30 @@
 from collections import namedtuple
+from twisted.spread import flavors
 from twisted.internet.defer import succeed
 from twisted.enterprise import adbapi
-from twisted.python import log
 import sqlite3
 
 
-LogEntry = namedtuple('LogEntry', 'term command')
+_LogEntry = namedtuple('LogEntry', 'term command')
+
+
+class LogEntry(_LogEntry, flavors.Copyable):
+
+    def getStateToCopy(self):
+        return tuple(self)
+
+
+class RemoteLogEntry(flavors.RemoteCopy):
+
+    def unjellyFor(self, unjellier, jellyList):
+        if unjellier.invoker is None:
+            return flavors.setInstanceState(self, unjellier, jellyList)
+        return LogEntry(*unjellier.unjelly(jellyList[1]))
+
+
+flavors.setUnjellyableForClass(LogEntry, RemoteLogEntry)
+
+
 AppendEntriesView = namedtuple('AppendEntriesView',
                                'currentTerm lastLogIndex prevLogTerm entries')
 

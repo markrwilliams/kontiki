@@ -476,6 +476,7 @@ class Leader(State):
     lowerBound = 0.02
 
     def __init__(self, *args, **kwargs):
+        log.msg('Became leader')
         super(Leader, self).__init__(*args, **kwargs)
         etRange = self.electionTimeoutRange
         self.heartbeatInterval = self.calculateHeartbeatInterval(etRange)
@@ -488,7 +489,6 @@ class Leader(State):
         return min(lowerTimeoutBound / 10.0, lowerBound)
 
     def begin(self, lowerBound=None):
-        log.msg('BECAME LEADER! ' * 10)
         startupDeferred = super(Leader, self).begin()
         startupDeferred.addCallback(self.postElection)
         return startupDeferred
@@ -552,7 +552,6 @@ class Leader(State):
 
         def sendPeerEntries(result):
             currentTerm, lastLogIndex, prevLogTerm, entries = result
-            entries = [tuple(entry) for entry in entries]
             commitIndex = self.commitIndex
             d = self.track(perspective.callRemote('appendEntries',
                                                   term=currentTerm,
@@ -571,7 +570,6 @@ class Leader(State):
         return viewDeferred
 
     def broadcastAppendEntries(self, ignored=None):
-        log.msg('BROADCASTING APPENDENTRIES')
         for identity, perspective in self.peers.items():
             self.sendAppendEntries(identity, perspective)
 

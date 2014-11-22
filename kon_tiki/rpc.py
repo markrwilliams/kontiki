@@ -91,7 +91,6 @@ class RaftServer(pb.Root):
 
     def remote_appendEntries(self, term, leaderId, prevLogIndex,
                              prevLogTerm, entries, leaderCommit):
-        entries = [LogEntry(*entry) for entry in entries]
         return self.lock.run(self._appendEntries, term, leaderId,
                              prevLogIndex, prevLogTerm, entries,
                              leaderCommit)
