@@ -330,22 +330,6 @@ class SQLitePersist(object):
 
         return self._runInteraction(insertEntries, [])
 
-    def logSlice(self, start, end):
-        """FOR TESTING ONLY"""
-        query = '''SELECT term, command
-                   FROM raft_log
-                   WHERE logIndex - 1 >= :start'''
-        params = {'start': start}
-        if end != -1:
-            query += '''
-                     AND logIndex - 1 < :end'''
-            params['end'] = end
-
-        def createLogEntries(result):
-            return [rowToLogEntry(row) for row in result]
-
-        return self._runQuery(query, params, [createLogEntries])
-
     def appendEntriesView(self, prevLogIndex):
 
         def acquireValues(txn):
@@ -376,3 +360,25 @@ class SQLitePersist(object):
                                      prevLogTerm, entries)
 
         return self._runInteraction(acquireValues, [])
+
+    def _logSlice(self, start, end):
+        """FOR TESTING ONLY"""
+        query = '''SELECT term, command
+                   FROM raft_log
+                   WHERE logIndex - 1 >= :start'''
+        params = {'start': start}
+        if end != -1:
+            query += '''
+                     AND logIndex - 1 < :end'''
+            params['end'] = end
+
+        def createLogEntries(result):
+            return [rowToLogEntry(row) for row in result]
+
+        return self._runQuery(query, params, [createLogEntries])
+
+    def _truncateLog(self):
+        """FOR TESTING ONLY"""
+        query = '''DELETE FROM raft_log'''
+
+        return self._runQuery(query, {}, [])

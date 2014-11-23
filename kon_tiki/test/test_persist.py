@@ -1,7 +1,8 @@
 import itertools
 from twisted.internet import defer
-from kon_tiki import persist
 from twisted.trial import unittest
+from kon_tiki import persist
+from kon_tiki.test.common import dropResult
 
 
 firstEntries = [persist.LogEntry(term=0, command='first1'),
@@ -17,77 +18,186 @@ class SQLitePersistTestCase(unittest.TestCase):
         self.persister = persist.SQLitePersist(':memory:')
         self.persister.connect()
 
-    def test_currentTerm(self):
-        def assertCurrentTerm(deferred, term):
-            deferred.addCallback(lambda ignore:
-                                 self.persister.getCurrentTerm())
-            deferred.addCallback(self.assertEqual, term)
-            return deferred
+    def test_getNewCurrentTerm(self):
+        '''The currentTerm of a fresh persister should be 0'''
 
-        d = assertCurrentTerm(defer.succeed(None), 0)
-        d.addCallback(lambda ignore:
-                      self.persister.setCurrentTerm(None, increment=True))
-        d.addCallback(self.assertEqual, second=1)
+        results = self.persister.getCurrentTerm()
 
-        d = assertCurrentTerm(d, 1)
+        failureMessage = 'getCurrentTerm for new persister should return 0'
+        results.addCallback(self.assertEqual, 0, msg=failureMessage)
 
-        d.addCallback(lambda ignore:
-                      self.persister.setCurrentTerm(123))
-        d.addCallback(self.assertEqual, second=123)
+        return results
 
-        d = assertCurrentTerm(d, 123)
+    def test_setCurrentTerm(self):
+        '''setcurrentTerm should durably set the current term.
 
-        return d
+        '''
+        results = self.persister.setCurrentTerm(123)
 
-    def test_votedFor(self):
-        d = self.persister.votedFor()
-        d.addCallback(self.assertIs, second=None)
+        setCurrentTermFailureMessage = 'setCurrentTerm did not set the term'
+        results.addCallback(self.assertEqual, 123,
+                            msg=setCurrentTermFailureMessage)
 
-        d.addCallback(lambda ignore:
-                      self.persister.voteFor("me"))
-        d.addCallback(lambda ignore:
-                      self.persister.votedFor())
-        d.addCallback(self.assertEqual, second='me')
-        return d
+        results.addCallback(dropResult(self.persister.getCurrentTerm))
 
-    def test_matchAndAppendNewLogEntries(self):
-        d = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
-        d.addCallback(lambda ignore:
-                      self.persister.getLastIndex())
-        d.addCallback(self.assertEqual, second=len(firstEntries) - 1)
+        getCurrentTermFailureMessage = ('getCurrentTerm did not agree'
+                                        ' with setCurrentTerm')
+        results.addCallback(self.assertEqual, 123,
+                            msg=getCurrentTermFailureMessage)
+        return results
 
-        d.addCallback(lambda ignore:
-                      self.persister.getLastIndex())
-        d.addCallback(lambda lastIndex:
-                      self.persister.committableLogEntries(0, lastIndex))
-        d.addCallback(self.assertEqual, firstEntries[1:])
+    def test_incrementCurrentTerm(self):
+        '''setCurrentTerm should durably increment the currentTerm and return
+        it
 
-        d.addCallback(lambda ignore:
-                      self.persister.getLastIndex())
+        '''
+        results = defer.succeed(None)
 
-        d.addCallback(
-            lambda lastIndex:
-            self.persister.matchAndAppendNewLogEntries(lastIndex,
-                                                       appendedEntries))
-        d.addCallback(
-            lambda ignore:
-            self.persister.getLastIndex())
-        d.addCallback(self.assertEqual,
-                      second=len(firstEntries) + len(appendedEntries) - 1)
+        for expected in (1, 2, 3):
+            results.addCallback(dropResult(self.persister.setCurrentTerm,
+                                           None, increment=True))
 
-        return d
+            incrementFailureMessage = ('setCurrentTerm incremented term'
+                                       ' incorrectly')
+            results.addCallback(self.assertEqual, expected,
+                                msg=incrementFailureMessage)
 
-    def test_overlaps_matchAndAppendNewLogEntries(self):
-        # this needs to be generalized, the way it was for list persist
-        d = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
-        d.addCallback(
-            lambda ignore:
-            self.persister.matchAndAppendNewLogEntries(0, firstEntries))
-        d.addCallback(
-            lambda ignore:
-            self.persister.getLastIndex())
-        d.addCallback(self.assertEqual, len(firstEntries))
-        return d
+            results.addCallback(dropResult(self.persister.getCurrentTerm))
+
+            getCurrentTermFailureMessage = ('getCurrentTerm disagreed with'
+                                            ' incremented term')
+            results.addCallback(self.assertEqual, expected,
+                                msg=getCurrentTermFailureMessage)
+
+        return results
+
+    def test_newVotedFor(self):
+        '''votedFor should return None from a fresh persister.'''
+        results = self.persister.votedFor()
+
+        failureMessage = 'votedFor did not return None from a fresh persister'
+        results.addCallback(self.assertIs, None, msg=failureMessage)
+
+        return results
+
+    def test_voteFor(self):
+        '''voteFor should durably set the identity of the candidate voted
+        for.
+
+        '''
+        results = defer.succeed(None)
+
+        for identity in ('first id', 'second id'):
+            results.addCallback(dropResult(self.persister.voteFor, identity))
+
+            voteForFailureMessage = ('voteFor did not correctly set the'
+                                     ' candidate identity')
+            results.addCallback(self.assertEqual, identity,
+                                msg=voteForFailureMessage)
+
+            results.addCallback(dropResult(self.persister.votedFor))
+
+            votedForFailureMessage = 'votedFor disagreed with voteFor'
+            results.addCallback(self.assertEqual, identity,
+                                msg=votedForFailureMessage)
+
+        return results
+
+    def test_disjointMatchAndAppendNewLogEntries(self):
+        '''matchAndAppendNewLogEntries should append disjoint logs'''
+        results = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
+
+        results.addCallback(dropResult(self.persister.getLastIndex))
+
+        indexWrongFailure = ('getLastIndex claims'
+                             ' matchAndAppendNewLogEntries'
+                             ' failed to append entries')
+
+        firstEntriesNewIndex = len(firstEntries) - 1
+
+        results.addCallback(self.assertEqual, firstEntriesNewIndex,
+                            msg=indexWrongFailure)
+
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
+
+        logSliceWrongFailure = ('logSlice claims matchAndAppendNewLogEntries'
+                                ' failed to append entries')
+
+        results.addCallback(self.assertEqual, firstEntries,
+                            msg=logSliceWrongFailure)
+
+        results.addCallback(
+            dropResult(self.persister.matchAndAppendNewLogEntries,
+                       firstEntriesNewIndex, appendedEntries))
+
+        results.addCallback(
+            dropResult(self.persister.getLastIndex))
+
+        results.addCallback(self.assertEqual,
+                            len(firstEntries) + len(appendedEntries) - 1,
+                            msg=indexWrongFailure)
+
+        results.addCallback(
+            dropResult(self.persister._logSlice, 0, -1))
+
+        results.addCallback(self.assertEqual, firstEntries + appendedEntries,
+                            msg=logSliceWrongFailure)
+        return results
+
+    def test_overlappingMatchAndAppendNewLogEntries(self):
+        '''matchAndAppendNewLogEntries should delete conflicting entries and
+        ignore ones that match.
+
+        '''
+        results = defer.succeed(None)
+
+        for idx in xrange(len(firstEntries)):
+            # drop existing data
+            results.addCallback(dropResult(self.persister._truncateLog))
+
+            results.addCallback(
+                dropResult(self.persister.addNewEntries, firstEntries))
+
+            # construct overlappingEntries such that:
+            # 1) its 0th item matches the currentLog[idx]
+            # 2) its subsequent items do not match currentLog[idx+1:]
+            #
+            # then ensure that it's inserted at lastIndex = idx - 1
+            #
+            # overlappingLog:      [1][4][5]
+            # currentlog:    ...[1][1][2][3]...
+            #                       ^  ^
+            #                      /    \
+            #               lastIndex   idx
+            #
+            # matchAndAppendNewLogEntries should combine these such
+            # that:
+            #
+            # currentLog:    ...[1][1][4][5]
+
+            lastMatchingIndex = idx - 1
+            overlappingEntries = [firstEntries[idx]] + appendedEntries
+            expectedEntries = firstEntries[:idx] + overlappingEntries
+
+            results.addCallback(
+                dropResult(self.persister.matchAndAppendNewLogEntries,
+                           lastMatchingIndex, overlappingEntries))
+
+            results.addCallback(
+                dropResult(self.persister._logSlice, 0, -1))
+
+            def assertMatch(logSlice,
+                            idx=idx,
+                            overlappingEntries=overlappingEntries,
+                            expectedEntries=expectedEntries):
+                failureMessage = ('logSlice disagrees with overlapping'
+                                  ' matchAndAppendNewLogEntries @ %d' % idx)
+                self.assertEqual(logSlice,
+                                 expectedEntries,
+                                 msg=failureMessage)
+
+            results.addCallback(assertMatch)
+        return results
 
     def test_new_committableLogEntries(self):
         d = self.persister.committableLogEntries(0, 100)
@@ -110,20 +220,20 @@ class SQLitePersistTestCase(unittest.TestCase):
     def test_addNewEntries(self):
         d = self.persister.addNewEntries(firstEntries)
         d.addCallback(lambda ignore:
-                      self.persister.logSlice(0, -1))
+                      self.persister._logSlice(0, -1))
         d.addCallback(self.assertEqual, firstEntries)
 
         d.addCallback(lambda ignore:
                       self.persister.addNewEntries(appendedEntries))
         d.addCallback(lambda ignore:
-                      self.persister.logSlice(0, -1))
+                      self.persister._logSlice(0, -1))
         d.addCallback(self.assertEqual, firstEntries + appendedEntries)
 
     def test_logSlice(self):
-        d = self.persister.logSlice(0, 1000)
+        d = self.persister._logSlice(0, 1000)
         d.addCallback(self.assertFalse)
         d.addCallback(lambda ignore:
-                      self.persister.logSlice(0, -1))
+                      self.persister._logSlice(0, -1))
         d.addCallback(self.assertFalse)
 
         d.addCallback(lambda ignore:
@@ -132,14 +242,14 @@ class SQLitePersistTestCase(unittest.TestCase):
         for gte, lt in itertools.combinations(range(len(firstEntries)), 2):
             d.addCallback(
                 lambda ignore, lower=gte, upper=lt:
-                self.persister.logSlice(lower, upper))
+                self.persister._logSlice(lower, upper))
             d.addCallback(
                 lambda result, lower=gte, upper=lt:
                 self.assertEquals(result, firstEntries[lower:upper],
                                   msg='lower %d, upper %d' % (lower, upper)))
 
         d.addCallback(lambda ignore:
-                      self.persister.logSlice(0, -1))
+                      self.persister._logSlice(0, -1))
         d.addCallback(self.assertEquals, firstEntries)
 
         return d
