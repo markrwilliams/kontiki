@@ -14,8 +14,6 @@ from twisted.python import log
 from twisted.internet import reactor, defer, task
 import random
 
-RERUN_RPC = object()
-
 
 class State(object):
     '''A Raft participant.
