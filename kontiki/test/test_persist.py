@@ -1,8 +1,8 @@
 import itertools
 from twisted.internet import defer
 from twisted.trial import unittest
-from kon_tiki import persist
-from kon_tiki.test.common import dropResult
+from kontiki import persist
+from kontiki.test.common import dropResult
 
 
 firstEntries = [persist.LogEntry(term=0, command='first1'),

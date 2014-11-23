@@ -1,4 +1,4 @@
-from kon_tiki import fundamentals
+from kontiki import fundamentals
 from twisted.trial import unittest
 
 

@@ -1,8 +1,8 @@
 from twisted.python import log
 from twisted.internet import reactor
 from twisted.spread import pb
-from kon_tiki.persist import SQLitePersist
-from kon_tiki.rpc import RaftServer, PeerRPC
+from kontiki.persist import SQLitePersist
+from kontiki.rpc import RaftServer, PeerRPC
 
 
 def applyCommand(command):

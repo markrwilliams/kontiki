@@ -7,9 +7,9 @@ References:
     <https://ramcloud.stanford.edu/raft.pdf>
 
 '''
-from kon_tiki.persist import MatchAfterTooHigh
-from kon_tiki.fundamentals import majorityMedian
-from kon_tiki.rpc_objects import LogEntry
+from kontiki.persist import MatchAfterTooHigh
+from kontiki.fundamentals import majorityMedian
+from kontiki.rpc_objects import LogEntry
 from twisted.python import log
 from twisted.internet import reactor, defer, task
 import random
@@ -216,6 +216,7 @@ class State(object):
                                                       lastLogTerm)]
 
                 resultsDeferred = defer.gatherResults(criteria)
+
                 def determineVote(results):
                     if all(results) and term > currentTerm:
                         log.msg("requestVote: candidate %s is OK"
@@ -256,6 +257,7 @@ class StartsElection(State):
     clock = reactor
 
     def begin(self):
+        self.rng = random.Random()
         startupDeferred = super(StartsElection, self).begin()
         startupDeferred.addCallback(self.resetElectionTimeout)
         return startupDeferred
@@ -271,7 +273,7 @@ class StartsElection(State):
 
     def resetElectionTimeout(self, ignored=None):
         self.cancelBecomeCandidateTimeout()
-        self.electionTimeout = random.uniform(*self.electionTimeoutRange)
+        self.electionTimeout = self.rng.uniform(*self.electionTimeoutRange)
 
         def timeoutOccured():
             log.msg('Election timeout occurred')

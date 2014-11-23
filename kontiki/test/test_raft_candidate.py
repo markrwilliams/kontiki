@@ -1,5 +1,5 @@
-from kon_tiki import raft
-from kon_tiki import persist
+from kontiki import raft
+from kontiki import persist
 from twisted.trial import unittest
 from twisted.internet import task
 

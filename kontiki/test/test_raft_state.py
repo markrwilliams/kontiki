@@ -1,8 +1,8 @@
 from twisted.trial import unittest
 from twisted.internet import defer, task
-from kon_tiki import raft, rpc
-from kon_tiki import persist, rpc_objects
-from kon_tiki.test.common import dropResult
+from kontiki import raft, rpc
+from kontiki import persist, rpc_objects
+from kontiki.test.common import dropResult
 
 def applyCommand(*args):
     return defer.succeed(None)

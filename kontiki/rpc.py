@@ -1,7 +1,7 @@
 from twisted.internet import defer, reactor
 from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.spread import pb
-from kon_tiki import raft, rpc_objects
+from kontiki import raft, rpc_objects
 
 
 rpc_objects.establishObjects()

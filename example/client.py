@@ -1,6 +1,6 @@
 from twisted.internet import task, reactor
 from twisted.python import util
-from kon_tiki.rpc import PeerRPC
+from kontiki.rpc import PeerRPC
 import time
 
 

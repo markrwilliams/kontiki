@@ -3,7 +3,7 @@ from twisted.internet.defer import succeed
 from twisted.enterprise import adbapi
 import sqlite3
 
-from kon_tiki.rpc_objects import LogEntry
+from kontiki.rpc_objects import LogEntry
 
 
 AppendEntriesView = namedtuple('AppendEntriesView',

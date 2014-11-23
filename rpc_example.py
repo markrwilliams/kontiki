@@ -1,7 +1,7 @@
 from twisted.internet import reactor, defer, task
 from twisted.python.util import println
 import time
-from kon_tiki.rpc import ReconnectingPBClientFactory
+from kontiki.rpc import ReconnectingPBClientFactory
 
 
 class ExampleClient(object):
