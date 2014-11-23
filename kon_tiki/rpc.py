@@ -1,8 +1,10 @@
 from twisted.internet import defer, reactor
 from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.spread import pb
-from kon_tiki.persist import LogEntry
-from kon_tiki import raft
+from kon_tiki import raft, rpc_objects
+
+
+rpc_objects.establishObjects()
 
 
 class ReconnectingPBClientFactory(pb.PBClientFactory,

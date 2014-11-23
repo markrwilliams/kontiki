@@ -7,9 +7,9 @@ References:
     <https://ramcloud.stanford.edu/raft.pdf>
 
 '''
-import traceback
-from kon_tiki.persist import LogEntry, MatchAfterTooHigh
+from kon_tiki.persist import MatchAfterTooHigh
 from kon_tiki.fundamentals import majorityMedian
+from kon_tiki.rpc_objects import LogEntry
 from twisted.python import log
 from twisted.internet import reactor, defer, task
 import random
@@ -218,7 +218,6 @@ class State(object):
                                                       lastLogTerm)]
 
                 resultsDeferred = defer.gatherResults(criteria)
-
                 def determineVote(results):
                     if all(results) and term > currentTerm:
                         log.msg("requestVote: candidate %s is OK"
@@ -238,7 +237,12 @@ class State(object):
                         return setVote
                     else:
                         log.msg('requestVote: candidate %s is not OK, '
-                                'May become follower ' % candidateId)
+                                'results: %s, '
+                                'term (%d) > currentTerm (%d): %r, '
+                                'May become follower ' % (candidateId,
+                                                          results,
+                                                          term, currentTerm,
+                                                          term > currentTerm))
                         return self.willBecomeFollower(term,
                                                        currentTerm=currentTerm)
 

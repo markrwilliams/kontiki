@@ -1,8 +1,8 @@
+from twisted.trial import unittest
 from twisted.internet import defer, task
 from kon_tiki import raft, rpc
-from kon_tiki import persist
-from twisted.trial import unittest
-
+from kon_tiki import persist, rpc_objects
+from kon_tiki.test.common import dropResult
 
 def applyCommand(*args):
     return defer.succeed(None)
@@ -44,12 +44,11 @@ class RaftStateTest(unittest.TestCase):
         ID = 'some_ID'
         d = state.candidateIdOK(candidateId=ID)
         d.addCallback(self.assertTrue)
-        d.addCallback(lambda ignore:
-                      state.persister.votedFor())
-        d.addCallback(lambda ignore:
-                      state.persister.voteFor('otherId'))
-        d.addCallback(lambda ignore:
-                      state.candidateIdOK(candidateId=ID))
+        d.addCallback(dropResult(state.persister.votedFor))
+        d.addCallback(
+            dropResult(state.persister.voteFor, 'otherId'))
+        d.addCallback(
+            dropResult(state.candidateIdOK, candidateId=ID))
         d.addCallback(self.assertFalse)
         return d
 
@@ -64,45 +63,42 @@ class RaftStateTest(unittest.TestCase):
         currentTerm = 100
         log = []
         for x in xrange(10):
-            log.append(persist.LogEntry(term=currentTerm, command=x))
+            log.append(rpc_objects.LogEntry(term=currentTerm, command=x))
         d = state.persister.setCurrentTerm(currentTerm)
-        d.addCallback(lambda ignore:
-                      state.persister.matchAndAppendNewLogEntries(-1,
-                                                                  log))
+        d.addCallback(
+            dropResult(state.persister.matchAndAppendNewLogEntries,
+                       -1, log))
 
         # Index and term are equal
         d.addCallback(
-            lambda ignore:
-            state.candidateLogUpToDate(lastLogIndex=len(log) - 1,
-                                       lastLogTerm=currentTerm))
+            dropResult(state.candidateLogUpToDate,
+                       lastLogIndex=len(log) - 1,
+                       lastLogTerm=currentTerm))
         d.addCallback(self.assertTrue)
 
         # Index is higher
         d.addCallback(
-            lambda ignore:
-            state.candidateLogUpToDate(lastLogIndex=len(log),
-                                       lastLogTerm=currentTerm))
+            dropResult(state.candidateLogUpToDate,
+                       lastLogIndex=len(log), lastLogTerm=currentTerm))
         d.addCallback(self.assertTrue)
 
         # Term is higher
         d.addCallback(
-            lambda ignore:
-            state.candidateLogUpToDate(lastLogIndex=len(log) - 1,
-                                       lastLogTerm=currentTerm + 1))
+            dropResult(state.candidateLogUpToDate,
+                       lastLogIndex=len(log) - 1,
+                       lastLogTerm=currentTerm + 1))
         d.addCallback(self.assertTrue)
 
         # # Index is lower
         d.addCallback(
-            lambda ignore:
-            state.candidateLogUpToDate(lastLogIndex=len(log) - 2,
-                                       lastLogTerm=currentTerm))
+            dropResult(state.candidateLogUpToDate,
+                       lastLogIndex=len(log) - 2, lastLogTerm=currentTerm))
         d.addCallback(self.assertFalse)
 
         # # Term is lower
         d.addCallback(
-            lambda ignore:
-            state.candidateLogUpToDate(lastLogIndex=len(log),
-                                       lastLogTerm=currentTerm - 1))
+            dropResult(state.candidateLogUpToDate,
+                       lastLogIndex=len(log), lastLogTerm=currentTerm - 1))
         d.addCallback(self.assertFalse)
         return d
 
@@ -123,40 +119,54 @@ class RaftStateTest(unittest.TestCase):
 
         log = []
         for x in xrange(10):
-            log.append(persist.LogEntry(term=currentTerm, command=x))
+            log.append(rpc_objects.LogEntry(term=currentTerm, command=x))
         d = state.persister.setCurrentTerm(currentTerm)
-        d.addCallback(lambda ignore:
-                      state.persister.matchAndAppendNewLogEntries(-1,
-                                                                  log))
+        d.addCallback(
+            dropResult(state.persister.matchAndAppendNewLogEntries,
+                       -1, log))
 
         # Test for term less then (case 1)
-        d.addCallback(lambda ignore:
-                      state.requestVote(term=currentTerm - 1,
-                                        candidateId=candidateId,
-                                        lastLogIndex=lastLogIndex,
-                                        lastLogTerm=lastLogTerm))
+        d.addCallback(
+            dropResult(state.requestVote,
+                       term=currentTerm - 1,
+                       candidateId=candidateId,
+                       lastLogIndex=lastLogIndex,
+                       lastLogTerm=lastLogTerm))
 
         d.addCallback(self.assertEquals, (currentTerm, False))
 
-        # Test for success (never voted before and voted for this
-        # candidate before)
-        for _ in xrange(2):
-            d.addCallback(lambda ignore:
-                          state.requestVote(term=currentTerm,
-                                            candidateId=candidateId,
-                                            lastLogIndex=lastLogIndex,
-                                            lastLogTerm=lastLogTerm))
-            d.addCallback(self.assertEquals, (currentTerm, True))
-            d.addCallback(lambda ignore:
-                          self.assertTrue(isinstance(state.server.state,
-                                                     raft.Follower)))
+        currentTerm += 1
+
+        # Test for success
+        d.addCallback(
+            dropResult(state.requestVote,
+                       term=currentTerm,
+                       candidateId=candidateId,
+                       lastLogIndex=lastLogIndex,
+                       lastLogTerm=lastLogTerm))
+        d.addCallback(self.assertEquals, (currentTerm, True))
+        d.addCallback(dropResult(self.assertTrue,
+                                 isinstance(state.server.state,
+                                            raft.Follower)))
 
         # Test for failure (voted before, but fell behind)
-        d.addCallback(lambda ignore:
-                      state.requestVote(term=currentTerm,
-                                        candidateId=candidateId,
-                                        lastLogIndex=lastLogIndex,
-                                        lastLogTerm=lastLogTerm - 1))
+        d.addCallback(
+            dropResult(state.requestVote,
+                       term=currentTerm,
+                       candidateId=candidateId,
+                       lastLogIndex=lastLogIndex,
+                       lastLogTerm=lastLogTerm - 1))
 
         d.addCallback(self.assertEquals, (currentTerm, False))
+
+        # Test for failure (already became follower for this term)
+        d.addCallback(
+            dropResult(state.requestVote,
+                       term=currentTerm,
+                       candidateId=candidateId,
+                       lastLogIndex=lastLogIndex,
+                       lastLogTerm=lastLogTerm))
+
+        d.addCallback(self.assertEquals, (currentTerm, False))
+
         return d

@@ -4,7 +4,7 @@ from twisted.trial import unittest
 from twisted.internet import task
 
 
-class RaftCandidateTest(unittest.TestCase):
+class RaftCandidateTest:
 
     def create_candidate(self):
         persister = persist.ListPersist()

@@ -18,21 +18,20 @@ class SQLitePersistTestCase(unittest.TestCase):
         self.persister = persist.SQLitePersist(':memory:')
         self.persister.connect()
 
-    def test_getNewCurrentTerm(self):
-        '''The currentTerm of a fresh persister should be 0'''
-
-        results = self.persister.getCurrentTerm()
-
-        failureMessage = 'getCurrentTerm for new persister should return 0'
-        results.addCallback(self.assertEqual, 0, msg=failureMessage)
-
-        return results
-
-    def test_setCurrentTerm(self):
-        '''setcurrentTerm should durably set the current term.
+    def test_setAndGetCurrentTerm(self):
+        '''getCurrentTerm should return the current term; if the persister is
+        new, the term should be 0.  setcurrentTerm should durably set
+        the current term, and it should be retrievable by
+        getCurrentTerm.
 
         '''
-        results = self.persister.setCurrentTerm(123)
+        results = self.persister.getCurrentTerm()
+
+        zeroFailureMessage = 'getCurrentTerm for new persister should return 0'
+        results.addCallback(self.assertEqual, 0, msg=zeroFailureMessage)
+
+        results.addCallback(
+            dropResult(self.persister.setCurrentTerm, 123))
 
         setCurrentTermFailureMessage = 'setCurrentTerm did not set the term'
         results.addCallback(self.assertEqual, 123,
@@ -48,7 +47,7 @@ class SQLitePersistTestCase(unittest.TestCase):
 
     def test_incrementCurrentTerm(self):
         '''setCurrentTerm should durably increment the currentTerm and return
-        it
+        it.
 
         '''
         results = defer.succeed(None)
@@ -71,21 +70,19 @@ class SQLitePersistTestCase(unittest.TestCase):
 
         return results
 
-    def test_newVotedFor(self):
-        '''votedFor should return None from a fresh persister.'''
-        results = self.persister.votedFor()
+    def test_votedForAndvoteFor(self):
+        '''votedFor should return the identity of the candidate voted for most
+        recently; if the persister is new, it should return None.
 
-        failureMessage = 'votedFor did not return None from a fresh persister'
-        results.addCallback(self.assertIs, None, msg=failureMessage)
-
-        return results
-
-    def test_voteFor(self):
-        '''voteFor should durably set the identity of the candidate voted
-        for.
+        voteFor should durably set the identity of the candidate voted
+        for, and that identity should be retrievable by votedFor
 
         '''
-        results = defer.succeed(None)
+        results = self.persister.votedFor()
+
+        noneVotedForFailure = 'votedFor for a empty persister should be None'
+
+        results.addCallback(self.assertEqual, None, msg=noneVotedForFailure)
 
         for identity in ('first id', 'second id'):
             results.addCallback(dropResult(self.persister.voteFor, identity))
@@ -103,8 +100,97 @@ class SQLitePersistTestCase(unittest.TestCase):
 
         return results
 
+    def test_getLastTerm(self):
+        '''getLastTerm should return the term of the last log entry; an empty
+        persister's getLastTerm should return 0.
+
+        '''
+        results = self.persister.getLastTerm()
+
+        zeroFailureMessage = "getLastTerm for an empty persister should return 0"
+        results.addCallback(self.assertEqual, 0, msg=zeroFailureMessage)
+
+        for entries in (firstEntries, appendedEntries):
+            results.addCallback(
+                dropResult(self.persister.addNewEntries, entries))
+
+            results.addCallback(
+                dropResult(self.persister.getLastTerm))
+
+            failureMessage = 'getLastTerm returned wrong term'
+
+            results.addCallback(self.assertEqual, entries[-1].term,
+                                msg=failureMessage)
+        return results
+
+    def test_getLastIndex(self):
+        '''getLastIndex should return the index of the last log entry; an empty
+        persister's getLastIndex should return -1.
+
+        '''
+        results = self.persister.getLastIndex()
+
+        negOneFailureMessage = ('getLastTerm for an empty persister'
+                                ' should return -1')
+        results.addCallback(self.assertEqual, -1, msg=negOneFailureMessage)
+
+        lastIndex = -1
+        for entries in (firstEntries, appendedEntries):
+            lastIndex += len(entries)
+            results.addCallback(
+                dropResult(self.persister.addNewEntries, entries))
+
+            results.addCallback(
+                dropResult(self.persister.getLastIndex))
+
+            failureMessage = 'getLastIndex returned the wrong index'
+            results.addCallback(self.assertEqual, lastIndex,
+                                msg=failureMessage)
+        return results
+
+    def test_committableLogEntries(self):
+        '''committableLogEntries should return log entries with indices in the
+        range (lastApplied, commitIndex].  An empty persister has no
+        committable log entries.
+
+        '''
+        results = self.persister.committableLogEntries(0, 100)
+
+        emptyFailureMessage = ('committableLogEntries for an empty'
+                               ' persister should return an empty list')
+        results.addCallback(self.assertEqual, [], msg=emptyFailureMessage)
+
+        results.addCallback(
+            dropResult(self.persister.addNewEntries, firstEntries))
+
+        indices = range(-1, len(firstEntries))
+        for lastApplied, commitIndex in itertools.combinations(indices, 2):
+            results.addCallback(
+                dropResult(self.persister.committableLogEntries,
+                           lastApplied, commitIndex))
+
+            def assertEntries(result,
+                              lastApplied=lastApplied,
+                              commitIndex=commitIndex):
+                # convert (,] interval to [,)
+                start, stop = lastApplied + 1, commitIndex + 1
+                expected = firstEntries[start:stop]
+
+                failureMessage = ('committableLogEntries returned wrong'
+                                  ' entries for lastApplied %d and'
+                                  ' commitIndex %d' % (lastApplied,
+                                                       commitIndex))
+
+                self.assertEqual(result, expected, msg=failureMessage)
+
+            results.addCallback(assertEntries)
+
+        return results
+
     def test_disjointMatchAndAppendNewLogEntries(self):
-        '''matchAndAppendNewLogEntries should append disjoint logs'''
+        '''matchAndAppendNewLogEntries should append disjoint logs.
+
+        '''
         results = self.persister.matchAndAppendNewLogEntries(-1, firstEntries)
 
         results.addCallback(dropResult(self.persister.getLastIndex))
@@ -142,6 +228,62 @@ class SQLitePersistTestCase(unittest.TestCase):
 
         results.addCallback(self.assertEqual, firstEntries + appendedEntries,
                             msg=logSliceWrongFailure)
+        return results
+
+    def test_indexMatchesTerm(self):
+        '''indexMatchesTerm should return True if the log entry's term matches
+        term at the index, or if there are no entries in the log.
+
+        '''
+        results = self.persister.indexMatchesTerm(10, 123)
+        trueFailureMessage = ('indexMatchesTerm should return True for'
+                              ' an empty persister')
+        results.addCallback(self.assertTrue, msg=trueFailureMessage)
+
+        results.addCallback(
+            dropResult(self.persister.addNewEntries, firstEntries))
+
+        for idx, entry in enumerate(firstEntries):
+
+            def closureCallbacks(idx=idx, entry=entry):
+                results.addCallback(
+                    dropResult(self.persister.indexMatchesTerm,
+                               idx, entry.term))
+
+                failureMessage = ('indexMatchesTerm returned False for'
+                                  ' idx %d and term %d' % (idx, entry.term))
+                results.addCallback(self.assertTrue, msg=failureMessage)
+
+            closureCallbacks()
+
+        return results
+
+    def test_lastIndexLETerm(self):
+        '''lastIndexLETerm should return True if the persister's lastIndex is
+        less than or equal to the term.  An empty'''
+        results = self.persister.lastIndexLETerm(123)
+
+        trueFailureMessage = ('lastIndexLETerm should return True for'
+                              ' an empty persister')
+        results.addCallback(self.assertTrue, msg=trueFailureMessage)
+
+        for idx, entry in enumerate(firstEntries + appendedEntries):
+
+            def closureCallbacks(idx=idx, entry=entry):
+                results.addCallback(
+                    dropResult(self.persister.addNewEntries,
+                               [entry]))
+
+                results.addCallback(
+                    dropResult(self.persister.lastIndexLETerm,
+                               entry.term))
+
+                failureMessage = ('lastIndexLETerm returned False for'
+                                  ' idx %d and term %d' % (idx, entry.term))
+                results.addCallback(self.assertTrue, msg=failureMessage)
+
+            closureCallbacks()
+
         return results
 
     def test_overlappingMatchAndAppendNewLogEntries(self):
@@ -197,118 +339,131 @@ class SQLitePersistTestCase(unittest.TestCase):
                                  msg=failureMessage)
 
             results.addCallback(assertMatch)
+
         return results
 
-    def test_new_committableLogEntries(self):
-        d = self.persister.committableLogEntries(0, 100)
-        d.addCallback(self.assertEqual, second=[])
-        return d
+    def test_tooLargeIndexMatchAndAppendNewLogEntries(self):
+        '''Attempting to match logs after the last index should result in a
+        MatchAfterTooHigh failure.
 
-    def test_getLastTerm(self):
-        d = self.persister.getLastTerm()
-        d.addCallback(self.assertEqual, 0)
-        d.addCallback(
-            lambda ignore:
-            self.persister.matchAndAppendNewLogEntries(-1,
-                                                       appendedEntries))
-
-        d.addCallback(lambda ignore:
-                      self.persister.getLastTerm())
-        d.addCallback(self.assertEqual, 3)
-        return d
+        '''
+        results = self.persister.matchAndAppendNewLogEntries(123, firstEntries)
+        return self.assertFailure(results, persist.MatchAfterTooHigh)
 
     def test_addNewEntries(self):
-        d = self.persister.addNewEntries(firstEntries)
-        d.addCallback(lambda ignore:
-                      self.persister._logSlice(0, -1))
-        d.addCallback(self.assertEqual, firstEntries)
+        '''addNewEntries should append the entries to the end of the log
+        without any matching.
 
-        d.addCallback(lambda ignore:
-                      self.persister.addNewEntries(appendedEntries))
-        d.addCallback(lambda ignore:
-                      self.persister._logSlice(0, -1))
-        d.addCallback(self.assertEqual, firstEntries + appendedEntries)
+        '''
+        results = self.persister.addNewEntries(firstEntries)
 
-    def test_logSlice(self):
-        d = self.persister._logSlice(0, 1000)
-        d.addCallback(self.assertFalse)
-        d.addCallback(lambda ignore:
-                      self.persister._logSlice(0, -1))
-        d.addCallback(self.assertFalse)
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
 
-        d.addCallback(lambda ignore:
-                      self.persister.addNewEntries(firstEntries))
+        entriesFailureMessage = 'addNewEntries failed to add all entries'
+        results.addCallback(self.assertEqual, firstEntries,
+                            msg=entriesFailureMessage)
 
+        results.addCallback(dropResult(self.persister.addNewEntries,
+                                       appendedEntries))
+
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
+        results.addCallback(self.assertEqual,
+                            firstEntries + appendedEntries,
+                            msg=entriesFailureMessage)
+        return results
+
+    def test__logSlice(self):
+        '''Sanity test for test crutch _logSlice.  _logSlice should return
+        log entries between [start, end).
+
+        '''
+        results = self.persister._logSlice(0, 1000)
+
+        falseFailure = '_logSlice on empty persister return non-empty list'
+        results.addCallback(self.assertFalse, msg=falseFailure)
+
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
+        results.addCallback(self.assertFalse, msg=falseFailure)
+
+        results.addCallback(dropResult(self.persister.addNewEntries,
+                                       firstEntries))
         for gte, lt in itertools.combinations(range(len(firstEntries)), 2):
-            d.addCallback(
-                lambda ignore, lower=gte, upper=lt:
-                self.persister._logSlice(lower, upper))
-            d.addCallback(
-                lambda result, lower=gte, upper=lt:
-                self.assertEquals(result, firstEntries[lower:upper],
-                                  msg='lower %d, upper %d' % (lower, upper)))
 
-        d.addCallback(lambda ignore:
-                      self.persister._logSlice(0, -1))
-        d.addCallback(self.assertEquals, firstEntries)
+            def closureCallbacks(gte=gte, lt=lt):
+                results.addCallback(
+                    dropResult(self.persister._logSlice, gte, lt))
 
-        return d
+                failureMesage = '_logSlice(%d, %d) returned incorrect list'
 
-    def test_indexMatchesTerm(self):
-        d = self.persister.indexMatchesTerm(10, 123)
-        d.addCallback(self.assertTrue)
+                results.addCallback(self.assertEquals,
+                                    firstEntries[gte:lt],
+                                    msg=failureMesage)
 
-        d.addCallback(lambda ignore:
-                      self.persister.addNewEntries(firstEntries))
+            closureCallbacks()
 
-        for idx, entry in enumerate(firstEntries):
-            d.addCallback(
-                lambda ignore, idx=idx, entry=entry:
-                self.persister.indexMatchesTerm(idx, entry.term))
-            d.addCallback(self.assertTrue)
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
 
-        return d
+        fullEntriesFailureMessage = '_logSlice(0, -1) returned incorrect list'
+        results.addCallback(self.assertEquals, firstEntries,
+                            msg=fullEntriesFailureMessage)
 
-    def test_indexLETerm(self):
-        d = self.persister.lastIndexLETerm(123)
-        d.addCallback(self.assertTrue)
+        return results
 
-        for entry in firstEntries + appendedEntries:
-            d.addCallback(lambda ignore, entry=entry:
-                          self.persister.addNewEntries([entry]))
-            d.addCallback(lambda ignore, entry=entry:
-                          self.persister.lastIndexLETerm(entry.term))
-            d.addCallback(self.assertTrue)
+    def test__truncateLog(self):
+        '''Sanity test for test crutch _truncateLog.  _truncateLog should do
+        just that: truncate the log.
 
-        return d
+        '''
+        results = self.persister.addNewEntries(firstEntries)
+        results.addCallback(dropResult(self.persister._truncateLog))
+        results.addCallback(dropResult(self.persister._logSlice, 0, -1))
+
+        emptyLogFailure = "_truncateLog didn't truncate the log"
+        results.addCallback(self.assertFalse, msg=emptyLogFailure)
+        return results
 
     def test_appendEntriesView(self):
-        d = self.persister.appendEntriesView(123)
+        '''appendEntriesView should return a "view" tuple:
+
+        1) the currentTerm of the persister,
+        2) the lastLogIndex of the persister,
+        3) the prevLogTerm for the log entry at the provided prevLogIndex,
+        4) a list of entries after prevLogIndex.
+
+        For an empty persister, these should be their defaults as above.
+        '''
+
+        results = self.persister.appendEntriesView(123)
         emptyExpected = persist.AppendEntriesView(currentTerm=0,
                                                   lastLogIndex=-1,
-                                                  prevLogTerm=None,
+                                                  prevLogTerm=0,
                                                   entries=[])
-        d.addCallback(self.assertEqual, emptyExpected)
+        emptyFailureMessage = ('appendEntriesView empty persister returned'
+                               ' incorrect AppendEntriesView object')
 
-        d.addCallback(lambda ignore:
-                      self.persister.addNewEntries(firstEntries))
+        results.addCallback(self.assertEqual, emptyExpected,
+                            msg=emptyFailureMessage)
+
+        results.addCallback(dropResult(self.persister.addNewEntries,
+                                       firstEntries))
 
         for prevLogIndex in xrange(len(firstEntries)):
-            d.addCallback(lambda ignore, prevLogIndex=prevLogIndex:
-                          self.persister.appendEntriesView(prevLogIndex))
 
-            def verifyView(view, prevLogIndex=prevLogIndex):
-                currentTerm = 0
-                prevLogTerm = firstEntries[prevLogIndex]
-                entries = firstEntries[prevLogIndex + 1:]
-                lastLogIndex = len(firstEntries) + 1
-                expected = persist.AppendEntriesView(currentTerm,
-                                                     lastLogIndex,
-                                                     prevLogIndex,
-                                                     prevLogTerm,
-                                                     entries)
-                self.assertEqual(view, expected)
+            def closureCallback(prevLogIndex=prevLogIndex):
+                results.addCallback(
+                    dropResult(self.persister.appendEntriesView, prevLogIndex))
 
-                d.addCallback(verifyView)
+                def verifyView(view):
+                    currentTerm = 0
+                    prevLogTerm = firstEntries[prevLogIndex].term
+                    entries = firstEntries[prevLogIndex + 1:]
+                    lastLogIndex = len(firstEntries) - 1
+                    expected = persist.AppendEntriesView(currentTerm,
+                                                         lastLogIndex,
+                                                         prevLogTerm,
+                                                         entries)
+                    self.assertEqual(view, expected)
 
-        return d
+                results.addCallback(verifyView)
+            closureCallback()
+        return results

@@ -1,28 +1,9 @@
 from collections import namedtuple
-from twisted.spread import flavors
 from twisted.internet.defer import succeed
 from twisted.enterprise import adbapi
 import sqlite3
 
-
-_LogEntry = namedtuple('LogEntry', 'term command')
-
-
-class LogEntry(_LogEntry, flavors.Copyable):
-
-    def getStateToCopy(self):
-        return tuple(self)
-
-
-class RemoteLogEntry(flavors.RemoteCopy):
-
-    def unjellyFor(self, unjellier, jellyList):
-        if unjellier.invoker is None:
-            return flavors.setInstanceState(self, unjellier, jellyList)
-        return LogEntry(*unjellier.unjelly(jellyList[1]))
-
-
-flavors.setUnjellyableForClass(LogEntry, RemoteLogEntry)
+from kon_tiki.rpc_objects import LogEntry
 
 
 AppendEntriesView = namedtuple('AppendEntriesView',
@@ -342,15 +323,15 @@ class SQLitePersist(object):
             lastLogIndex = txn.execute(lastLogIndexQuery).fetchone()[0]
 
             entriesQuery = '''SELECT logIndex - 1, term, command
-                                     FROM raft_log
-                                     WHERE logIndex - 1 >= :prevLogIndex'''
+                              FROM raft_log
+                              WHERE logIndex - 1 >= :prevLogIndex'''
             entriesQueryParams = {'prevLogIndex': prevLogIndex}
 
             entriesResult = txn.execute(entriesQuery,
                                         entriesQueryParams).fetchall()
 
             if not entriesResult:
-                prevLogTerm = None
+                prevLogTerm = 0
             else:
                 prevLogTerm = entriesResult.pop(0)['term']
 
