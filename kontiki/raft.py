@@ -6,6 +6,9 @@ References:
     Understandable Consensus Algorithm (Extended Version)". May 2014
     <https://ramcloud.stanford.edu/raft.pdf>
 
+[2] Howard, Heidi. "ARC: Analysis of Raft Consensus." July 2014.
+    <http://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-857.pdf>
+
 '''
 from kontiki.persist import MatchAfterTooHigh
 from kontiki.fundamentals import majorityMedian
@@ -538,12 +541,16 @@ class Leader(State):
                 return self.willBecomeFollower(term)
             elif not success:
                 self.nextIndex[identity] -= 1
-                # explicit rety maybe?
+                # explicit retry maybe?
                 # return self.sendAppendEntries(identity, self.peers[identity])
             else:
                 self.nextIndex[identity] = lastLogIndex + 1
                 self.matchIndex[identity] = lastLogIndex
                 if self.updateCommitIndex():
+                    # TODO: the leader can't commit any log entries
+                    # with terms < currentTerm unless it's committing
+                    # an entry from currentTerm.  this may result in a
+                    # livelock (see [2], pg 52)
                     return self.applyCommitted()
 
         return getCurrentTermDeferred.addCallback(compareTerm)
