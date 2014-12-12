@@ -334,7 +334,6 @@ class Follower(StartsElection):
                     return currentTerm, lastCommitIndex
 
                 d.addCallback(formatResult)
-                d.addErrback(lambda failure: failure)
                 return d
 
             updateDeferred.addCallback(getLastCommitIndex)
